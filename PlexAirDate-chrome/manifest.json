@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Plex Air Date",
+  "version": "0.1.0",
+  "description": "Adds the next airing episode date to Plex show and episode pages when a show is currently airing.",
+  "permissions": [],
+  "host_permissions": [
+    "https://api.tvmaze.com/*",
+    "https://graphql.anilist.co/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "css": [
+        "src/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

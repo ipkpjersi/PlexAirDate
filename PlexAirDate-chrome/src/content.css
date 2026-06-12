@@ -1,0 +1,51 @@
+.plex-air-date-row {
+  align-items: center;
+  color: rgba(255, 255, 255, 0.72);
+  display: flex;
+  font: inherit;
+  min-height: 24px;
+}
+
+.plex-air-date-row[data-state="ready"] {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.plex-air-date-pill {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plex-air-date-label {
+  color: rgba(255, 255, 255, 0.56);
+  font-weight: 600;
+}
+
+.plex-air-date-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plex-air-date-source {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+@media (prefers-color-scheme: light) {
+  .plex-air-date-row {
+    color: rgba(0, 0, 0, 0.7);
+  }
+
+  .plex-air-date-row[data-state="ready"] {
+    color: rgba(0, 0, 0, 0.78);
+  }
+
+  .plex-air-date-label {
+    color: rgba(0, 0, 0, 0.55);
+  }
+
+  .plex-air-date-source {
+    color: rgba(0, 0, 0, 0.42);
+  }
+}
