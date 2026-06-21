@@ -1,8 +1,10 @@
 .plex-air-date-row {
-  align-items: center;
+  align-items: flex-start;
   color: rgba(255, 255, 255, 0.72);
   display: flex;
+  flex-direction: column;
   font: inherit;
+  gap: 2px;
   min-height: 24px;
 }
 

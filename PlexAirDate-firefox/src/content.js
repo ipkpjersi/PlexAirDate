@@ -147,35 +147,56 @@
     row.dataset.state = "ready";
     row.innerHTML = "";
 
+    const titleParts = [];
+
+    if (data.aired) {
+      const text = formatEpisode(data.aired, airVerb(data.aired.airDate));
+      row.append(buildPill("Current episode", text, source));
+      titleParts.push(`Current episode: ${text}`);
+    }
+
+    if (data.next) {
+      const text = formatEpisode(data.next, "airs");
+      row.append(buildPill("Next episode", text, source));
+      titleParts.push(`Next episode: ${text}`);
+    }
+
+    row.title = `${titleParts.join(" | ")}${source}`;
+  }
+
+  function buildPill(labelText, valueText, source) {
     const pill = document.createElement("span");
     pill.className = "plex-air-date-pill";
 
     const label = document.createElement("span");
     label.className = "plex-air-date-label";
-    label.textContent = "Next episode";
+    label.textContent = labelText;
 
     const text = document.createElement("span");
     text.className = "plex-air-date-text";
-    text.textContent = formatNextEpisode(data);
+    text.textContent = valueText;
 
     const sourceNode = document.createElement("span");
     sourceNode.className = "plex-air-date-source";
     sourceNode.textContent = source;
 
     pill.append(label, text, sourceNode);
-    row.append(pill);
-    row.title = `${label.textContent}: ${text.textContent}${source}`;
+    return pill;
   }
 
-  function formatNextEpisode(data) {
+  function airVerb(date) {
+    return date > new Date() ? "airs" : "aired";
+  }
+
+  function formatEpisode(episode, verb) {
     const parts = [];
-    if (data.season && data.episode) {
-      parts.push(`S${data.season} E${data.episode}`);
-    } else if (data.episode) {
-      parts.push(`Episode ${data.episode}`);
+    if (episode.season && episode.episode) {
+      parts.push(`S${episode.season} E${episode.episode}`);
+    } else if (episode.episode) {
+      parts.push(`Episode ${episode.episode}`);
     }
 
-    parts.push(`airs ${formatAirDate(data.airDate)}`);
+    parts.push(`${verb} ${formatAirDate(episode.airDate)}`);
     return parts.join(" ");
   }
 
@@ -213,7 +234,7 @@
     });
   }
 
-  async function fetchNextEpisode(context) {
+  async function fetchAirInfo(context) {
     const cacheKey = context.title.toLowerCase();
     const cached = getCached(cacheKey);
     if (cached?.hit) {
@@ -245,29 +266,69 @@
       return null;
     }
 
-    const nextResponse = await fetch(`https://api.tvmaze.com/shows/${show.id}?embed=nextepisode`, {
+    const detailResponse = await fetch(
+      `https://api.tvmaze.com/shows/${show.id}?embed[]=nextepisode&embed[]=previousepisode`,
+      {
+        credentials: "omit"
+      }
+    );
+    if (!detailResponse.ok) {
+      return null;
+    }
+
+    const showWithEpisodes = await detailResponse.json();
+    const embedded = showWithEpisodes?._embedded;
+    const now = new Date();
+
+    const next = toTvmazeEpisode(embedded?.nextepisode);
+    const nextEpisode = next && next.airDate > now ? next : null;
+
+    let airedEpisode;
+    if (context.type === "episode" && context.season && context.episode) {
+      // On an episode page, show the air date of the specific episode being viewed.
+      airedEpisode = await fetchTvmazeEpisodeByNumber(show.id, context.season, context.episode).catch(() => null);
+    } else {
+      const previous = toTvmazeEpisode(embedded?.previousepisode);
+      airedEpisode = previous && previous.airDate <= now ? previous : null;
+    }
+
+    if (!nextEpisode && !airedEpisode) {
+      return null;
+    }
+
+    return {
+      source: "TVmaze",
+      aired: airedEpisode,
+      next: nextEpisode
+    };
+  }
+
+  async function fetchTvmazeEpisodeByNumber(showId, season, episode) {
+    const params = new URLSearchParams({ season: String(season), number: String(episode) });
+    const response = await fetch(`https://api.tvmaze.com/shows/${showId}/episodebynumber?${params.toString()}`, {
       credentials: "omit"
     });
-    if (!nextResponse.ok) {
+    if (!response.ok) {
       return null;
     }
 
-    const showWithNextEpisode = await nextResponse.json();
-    const next = showWithNextEpisode?._embedded?.nextepisode;
-    if (!next) {
+    return toTvmazeEpisode(await response.json());
+  }
+
+  function toTvmazeEpisode(episode) {
+    if (!episode) {
       return null;
     }
 
-    const airDate = next.airstamp ? parseAirDate(next.airstamp) : parseDateOnly(next.airdate);
-    if (!airDate || airDate <= new Date()) {
+    const airDate = episode.airstamp ? parseAirDate(episode.airstamp) : parseDateOnly(episode.airdate);
+    if (!airDate) {
       return null;
     }
 
     return {
       airDate,
-      episode: next.number || null,
-      season: next.season || null,
-      source: "TVmaze"
+      episode: episode.number || null,
+      season: episode.season || null
     };
   }
 
@@ -275,6 +336,7 @@
     const query = `
       query PlexAirDate($search: String) {
         Media(search: $search, type: ANIME) {
+          id
           synonyms
           title {
             english
@@ -321,21 +383,120 @@
       return null;
     }
 
+    const now = new Date();
+
     const next = media?.nextAiringEpisode;
-    if (!next?.airingAt) {
-      return null;
+    const nextAirDate = next?.airingAt ? new Date(next.airingAt * 1000) : null;
+    const nextEpisode =
+      nextAirDate && nextAirDate > now ? { airDate: nextAirDate, episode: next.episode || null, season: null } : null;
+
+    let airedEpisode = null;
+    if (media?.id) {
+      if (context.type === "episode" && context.episode) {
+        // On an episode page, show the air date of the specific episode being viewed.
+        airedEpisode = await fetchAniListEpisode(media.id, context.episode).catch(() => null);
+      } else {
+        airedEpisode = await fetchAniListLastAired(media.id).catch(() => null);
+      }
     }
 
-    const airDate = new Date(next.airingAt * 1000);
-    if (airDate <= new Date()) {
+    if (!nextEpisode && !airedEpisode) {
       return null;
     }
 
     return {
-      airDate,
-      episode: next.episode || null,
-      season: null,
-      source: "AniList"
+      source: "AniList",
+      aired: airedEpisode,
+      next: nextEpisode
+    };
+  }
+
+  async function fetchAniListEpisode(mediaId, episodeNumber) {
+    const query = `
+      query PlexAirDateEpisode($mediaId: Int, $episode: Int) {
+        Page(perPage: 1) {
+          airingSchedules(mediaId: $mediaId, episode: $episode) {
+            airingAt
+            episode
+          }
+        }
+      }
+    `;
+
+    const response = await fetch("https://graphql.anilist.co/", {
+      body: JSON.stringify({
+        query,
+        variables: {
+          mediaId,
+          episode: episodeNumber
+        }
+      }),
+      credentials: "omit",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      method: "POST"
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const schedule = payload?.data?.Page?.airingSchedules?.[0];
+    if (!schedule?.airingAt) {
+      return null;
+    }
+
+    return {
+      airDate: new Date(schedule.airingAt * 1000),
+      episode: schedule.episode || episodeNumber,
+      season: null
+    };
+  }
+
+  async function fetchAniListLastAired(mediaId) {
+    const query = `
+      query PlexAirDateLastAired($mediaId: Int) {
+        Page(perPage: 1) {
+          airingSchedules(mediaId: $mediaId, notYetAired: false, sort: TIME_DESC) {
+            airingAt
+            episode
+          }
+        }
+      }
+    `;
+
+    const response = await fetch("https://graphql.anilist.co/", {
+      body: JSON.stringify({
+        query,
+        variables: {
+          mediaId
+        }
+      }),
+      credentials: "omit",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      method: "POST"
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const schedule = payload?.data?.Page?.airingSchedules?.[0];
+    if (!schedule?.airingAt) {
+      return null;
+    }
+
+    return {
+      airDate: new Date(schedule.airingAt * 1000),
+      episode: schedule.episode || null,
+      season: null
     };
   }
 
@@ -387,8 +548,8 @@
       return;
     }
 
-    const nextEpisode = await fetchNextEpisode(context);
-    if (!nextEpisode) {
+    const airInfo = await fetchAirInfo(context);
+    if (!airInfo) {
       removeRow();
       return;
     }
@@ -398,7 +559,7 @@
       return;
     }
 
-    setRow(row, nextEpisode);
+    setRow(row, airInfo);
   }
 
   function scheduleRender() {

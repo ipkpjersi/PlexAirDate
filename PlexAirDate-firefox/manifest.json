@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Plex Air Date",
-  "version": "0.1.0",
-  "description": "Adds the next airing episode date to Plex show and episode pages when a show is currently airing.",
+  "version": "0.2.0",
+  "description": "Adds episode air dates to Plex show and episode pages, showing when the current episode aired and when the next episode airs.",
   "browser_specific_settings": {
     "gecko": {
       "id": "plex-air-date@example.com",
