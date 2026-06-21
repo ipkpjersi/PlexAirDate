@@ -2,11 +2,15 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.3.1
+
+- Season pages now show just the year as the first line, instead of a "Season aired" line.
+
 ## 0.3.0
 
 - Added a "Latest episode" line, shown between "Current episode" and "Next episode", with the air date of the most recently aired episode of the show.
 - Added support for Plex season pages: they now show the latest and next episode air dates.
-- Added a "Season" line on season pages showing when that season aired (premiere date), since Plex leaves that information empty.
+- Added a "Season aired" line on season pages showing when that season aired (premiere date), since Plex leaves that information empty.
 
 ## 0.2.0
 

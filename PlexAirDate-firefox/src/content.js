@@ -168,6 +168,16 @@
 
     const titleParts = [];
 
+    if (data.seasonAired) {
+      // On a season page, the first line is just the year the season aired.
+      const yearText = String(data.seasonAired.airDate.getFullYear());
+      const yearNode = document.createElement("span");
+      yearNode.className = "plex-air-date-text";
+      yearNode.textContent = yearText;
+      row.append(yearNode);
+      titleParts.push(yearText);
+    }
+
     if (data.current) {
       const text = formatEpisode(data.current, airVerb(data.current.airDate));
       row.append(buildPill("Current episode", text, source));
@@ -184,12 +194,6 @@
       const text = formatEpisode(data.next, "airs");
       row.append(buildPill("Next episode", text, source));
       titleParts.push(`Next episode: ${text}`);
-    }
-
-    if (data.seasonAired) {
-      const text = `${airVerb(data.seasonAired.airDate)} ${formatAirDate(data.seasonAired.airDate)}`;
-      row.append(buildPill("Season", text, source));
-      titleParts.push(`Season ${text}`);
     }
 
     row.title = `${titleParts.join(" | ")}${source}`;
