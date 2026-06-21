@@ -60,45 +60,64 @@
 
   function getMetadataContext() {
     const titleNode = document.querySelector('[data-testid="metadata-title"]');
-    const line1Node = document.querySelector('[data-testid="metadata-line1"]');
-    const line2Node = document.querySelector('[data-testid="metadata-line2"]');
-
-    if (!titleNode || !line1Node || !line2Node) {
+    if (!titleNode) {
       return null;
     }
 
     const title = normalizeTitle(titleNode.textContent || "");
-    const line1 = line1Node.textContent || "";
-    const seasonMatch = line1.match(/Season\s+(\d+)/iu);
-    const episodeMatch = line1.match(/Episode\s+(\d+)/iu);
-
     if (!title) {
       return null;
     }
 
-    if (seasonMatch && episodeMatch) {
-      return {
-        title,
-        type: "episode",
-        season: Number.parseInt(seasonMatch[1], 10),
-        episode: Number.parseInt(episodeMatch[1], 10),
-        line2Node,
-        pageKey: `${title}|episode|${seasonMatch[1]}|${episodeMatch[1]}|${location.href}`
-      };
+    const line1Node = document.querySelector('[data-testid="metadata-line1"]');
+    const line2Node = document.querySelector('[data-testid="metadata-line2"]');
+
+    // Episode and show pages expose line1/line2 metadata; the anchor is line2.
+    if (line1Node && line2Node) {
+      const line1 = line1Node.textContent || "";
+      const seasonMatch = line1.match(/Season\s+(\d+)/iu);
+      const episodeMatch = line1.match(/Episode\s+(\d+)/iu);
+
+      if (seasonMatch && episodeMatch) {
+        return {
+          title,
+          type: "episode",
+          season: Number.parseInt(seasonMatch[1], 10),
+          episode: Number.parseInt(episodeMatch[1], 10),
+          anchorNode: line2Node,
+          pageKey: `${title}|episode|${seasonMatch[1]}|${episodeMatch[1]}|${location.href}`
+        };
+      }
+
+      if (isShowTitlePage(line1)) {
+        return {
+          title,
+          type: "show",
+          season: null,
+          episode: null,
+          anchorNode: line2Node,
+          pageKey: `${title}|show|${location.href}`
+        };
+      }
     }
 
-    if (!isShowTitlePage(line1)) {
-      return null;
+    // Season pages have no line1/line2; the season number lives in the subtitle.
+    const subtitleNode = document.querySelector('[data-testid="metadata-subtitle"]');
+    if (subtitleNode) {
+      const seasonMatch = (subtitleNode.textContent || "").match(/Season\s+(\d+)/iu);
+      if (seasonMatch) {
+        return {
+          title,
+          type: "season",
+          season: Number.parseInt(seasonMatch[1], 10),
+          episode: null,
+          anchorNode: subtitleNode,
+          pageKey: `${title}|season|${seasonMatch[1]}|${location.href}`
+        };
+      }
     }
 
-    return {
-      title,
-      type: "show",
-      season: null,
-      episode: null,
-      line2Node,
-      pageKey: `${title}|show|${location.href}`
-    };
+    return null;
   }
 
   function isShowTitlePage(line1) {
@@ -110,8 +129,8 @@
     return hasShowYear || hasSeasonsHub;
   }
 
-  function getInsertionParent(line2Node) {
-    return line2Node.closest("div")?.parentElement || null;
+  function getInsertionParent(anchorNode) {
+    return anchorNode.closest("div")?.parentElement || null;
   }
 
   function removeRow() {
@@ -119,7 +138,7 @@
   }
 
   function ensureRow(context) {
-    const parent = getInsertionParent(context.line2Node);
+    const parent = getInsertionParent(context.anchorNode);
     if (!parent) {
       return null;
     }
@@ -131,9 +150,9 @@
       row.className = "plex-air-date-row";
       row.dataset.state = "loading";
 
-      const line2Wrapper = context.line2Node.closest("div");
-      if (line2Wrapper) {
-        line2Wrapper.insertAdjacentElement("afterend", row);
+      const anchorWrapper = context.anchorNode.closest("div");
+      if (anchorWrapper) {
+        anchorWrapper.insertAdjacentElement("afterend", row);
       } else {
         parent.append(row);
       }
@@ -149,16 +168,28 @@
 
     const titleParts = [];
 
-    if (data.aired) {
-      const text = formatEpisode(data.aired, airVerb(data.aired.airDate));
+    if (data.current) {
+      const text = formatEpisode(data.current, airVerb(data.current.airDate));
       row.append(buildPill("Current episode", text, source));
       titleParts.push(`Current episode: ${text}`);
+    }
+
+    if (data.latest) {
+      const text = formatEpisode(data.latest, airVerb(data.latest.airDate));
+      row.append(buildPill("Latest episode", text, source));
+      titleParts.push(`Latest episode: ${text}`);
     }
 
     if (data.next) {
       const text = formatEpisode(data.next, "airs");
       row.append(buildPill("Next episode", text, source));
       titleParts.push(`Next episode: ${text}`);
+    }
+
+    if (data.seasonAired) {
+      const text = `${airVerb(data.seasonAired.airDate)} ${formatAirDate(data.seasonAired.airDate)}`;
+      row.append(buildPill("Season", text, source));
+      titleParts.push(`Season ${text}`);
     }
 
     row.title = `${titleParts.join(" | ")}${source}`;
@@ -235,7 +266,7 @@
   }
 
   async function fetchAirInfo(context) {
-    const cacheKey = context.title.toLowerCase();
+    const cacheKey = `${context.title.toLowerCase()}|${context.type}|${context.season ?? ""}|${context.episode ?? ""}`;
     const cached = getCached(cacheKey);
     if (cached?.hit) {
       return cached.value;
@@ -283,23 +314,54 @@
     const next = toTvmazeEpisode(embedded?.nextepisode);
     const nextEpisode = next && next.airDate > now ? next : null;
 
-    let airedEpisode;
+    // The most recently aired episode of the whole show, shown on every page type.
+    const previous = toTvmazeEpisode(embedded?.previousepisode);
+    const latestEpisode = previous && previous.airDate <= now ? previous : null;
+
+    let currentEpisode = null;
     if (context.type === "episode" && context.season && context.episode) {
       // On an episode page, show the air date of the specific episode being viewed.
-      airedEpisode = await fetchTvmazeEpisodeByNumber(show.id, context.season, context.episode).catch(() => null);
-    } else {
-      const previous = toTvmazeEpisode(embedded?.previousepisode);
-      airedEpisode = previous && previous.airDate <= now ? previous : null;
+      currentEpisode = await fetchTvmazeEpisodeByNumber(show.id, context.season, context.episode).catch(() => null);
     }
 
-    if (!nextEpisode && !airedEpisode) {
+    let seasonAired = null;
+    if (context.type === "season" && context.season) {
+      // On a season page, show when that season premiered.
+      seasonAired = await fetchTvmazeSeasonPremiere(show.id, context.season).catch(() => null);
+    }
+
+    if (!nextEpisode && !latestEpisode && !currentEpisode && !seasonAired) {
       return null;
     }
 
     return {
       source: "TVmaze",
-      aired: airedEpisode,
-      next: nextEpisode
+      current: currentEpisode,
+      latest: latestEpisode,
+      next: nextEpisode,
+      seasonAired
+    };
+  }
+
+  async function fetchTvmazeSeasonPremiere(showId, season) {
+    const response = await fetch(`https://api.tvmaze.com/shows/${showId}/seasons`, {
+      credentials: "omit"
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const seasons = await response.json();
+    const match = Array.isArray(seasons) ? seasons.find((item) => item?.number === season) : null;
+    const airDate = parseDateOnly(match?.premiereDate);
+    if (!airDate) {
+      return null;
+    }
+
+    return {
+      airDate,
+      season,
+      episode: null
     };
   }
 
@@ -390,24 +452,27 @@
     const nextEpisode =
       nextAirDate && nextAirDate > now ? { airDate: nextAirDate, episode: next.episode || null, season: null } : null;
 
-    let airedEpisode = null;
+    let currentEpisode = null;
+    let latestEpisode = null;
     if (media?.id) {
       if (context.type === "episode" && context.episode) {
         // On an episode page, show the air date of the specific episode being viewed.
-        airedEpisode = await fetchAniListEpisode(media.id, context.episode).catch(() => null);
-      } else {
-        airedEpisode = await fetchAniListLastAired(media.id).catch(() => null);
+        currentEpisode = await fetchAniListEpisode(media.id, context.episode).catch(() => null);
       }
+      // The most recently aired episode of the matched title, shown on every page type.
+      latestEpisode = await fetchAniListLastAired(media.id).catch(() => null);
     }
 
-    if (!nextEpisode && !airedEpisode) {
+    if (!nextEpisode && !latestEpisode && !currentEpisode) {
       return null;
     }
 
     return {
       source: "AniList",
-      aired: airedEpisode,
-      next: nextEpisode
+      current: currentEpisode,
+      latest: latestEpisode,
+      next: nextEpisode,
+      seasonAired: null
     };
   }
 
