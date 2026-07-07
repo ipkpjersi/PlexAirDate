@@ -2,9 +2,9 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
-## 0.4.0
+## 0.4.1
 
-- Added a "Rating" line to show, season, and episode pages. For anime it shows the MyAnimeList (MAL) score, and for everything else it shows the IMDb rating, both out of 10. The source of the rating is shown next to it, so you can always see whether the score came from MAL, IMDb, AniList, or TVmaze.
+- Added the MyAnimeList (MAL) score for anime on show, season, and episode pages. Since Plex already shows IMDb and TMDB scores but never a MAL score, the MAL score is shown right beside Plex's own IMDb and TMDB badges. On pages where Plex has no ratings badges to sit beside, the MAL score is shown on its own line instead. When MAL has no score for a title, the AniList score is shown in its place and labelled as such.
 
 ## 0.3.1
 

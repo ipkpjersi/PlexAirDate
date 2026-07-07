@@ -1,29 +1,15 @@
 (() => {
   const ROW_ID = "plex-air-date-row";
+  // The MAL score is shown as a badge beside Plex's own IMDb/TMDB badges when they exist;
+  // ROW_RATING_ID is the fallback pill in our own row for pages without a ratings block.
+  const MAL_BADGE_ID = "plex-air-date-mal";
+  const ROW_RATING_ID = "plex-air-date-row-rating";
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-  // The OMDb API keys (used for IMDb ratings on non-anime titles) are stored XOR-obfuscated
-  // rather than as plaintext strings, so automated scrapers that crawl public repos and
-  // extension bundles for API keys cannot grab them. This is obfuscation, not encryption: a
-  // client-side extension has to rebuild the keys at runtime to call OMDb, so anyone reading
-  // the code or watching network traffic can still recover them. We ship more than one key
-  // and pick one at random per request to spread load across their daily quotas (each free
-  // key allows ~1000 requests/day). To use your own keys, XOR each character code against
-  // OMDB_KEY_MASK (repeating) to regenerate a cipher, or empty OMDB_KEY_CIPHERS to fall back
-  // to the TVmaze rating instead.
-  const OMDB_KEY_MASK = [0x5a, 0x3c, 0x27, 0x6e];
-  const OMDB_KEY_CIPHERS = [
-    [56, 12, 18, 91, 99, 95, 70, 12],
-    [62, 95, 21, 87, 111, 11, 65, 91]
-  ];
-  const OMDB_API_KEYS = OMDB_KEY_CIPHERS.map((cipher) =>
-    cipher
-      .map((code, index) => String.fromCharCode(code ^ OMDB_KEY_MASK[index % OMDB_KEY_MASK.length]))
-      .join("")
-  ).filter(Boolean);
   const cache = new Map();
 
   let pendingRender = 0;
   let lastPageKey = "";
+  let lastRating = null;
 
   const monthDayYearFormatter = new Intl.DateTimeFormat(undefined, {
     day: "numeric",
@@ -180,7 +166,7 @@
     return row;
   }
 
-  function setRow(row, data) {
+  function setRow(row, data, showRating) {
     const source = data.source ? ` ${data.source}` : "";
     row.dataset.state = "ready";
     row.innerHTML = "";
@@ -197,10 +183,11 @@
       titleParts.push(yearText);
     }
 
-    if (data.rating) {
-      // Show-level rating: MAL score for anime, TVmaze rating for everything else.
+    if (showRating && data.rating) {
+      // Fallback for pages with no Plex ratings block to sit beside: show the anime score
+      // (MAL, or AniList as a fallback) on our own line instead.
       const text = formatRating(data.rating);
-      row.append(buildPill("Rating", text, ` ${data.rating.source}`));
+      row.append(buildRatingPill(data.rating));
       titleParts.push(`Rating: ${text} ${data.rating.source}`);
     }
 
@@ -261,8 +248,96 @@
     return parts.join(" ");
   }
 
+  function formatScore(rating) {
+    return rating.score.toFixed(2);
+  }
+
   function formatRating(rating) {
-    return `${rating.score.toFixed(1)} / ${rating.max}`;
+    return `${formatScore(rating)} / ${rating.max}`;
+  }
+
+  // Plex renders its IMDb/TMDB scores as spans titled "<name> Rating ..." inside the
+  // metadata-ratings block. Find that flex row so we can drop a matching MAL badge into it.
+  function findRatingsSlot() {
+    const ratingsNode = document.querySelector('[data-testid="metadata-ratings"]');
+    if (!ratingsNode) {
+      return null;
+    }
+
+    const template = ratingsNode.querySelector('span[title*="Rating"]');
+    if (!template || !template.parentElement) {
+      return null;
+    }
+
+    return { container: template.parentElement, template };
+  }
+
+  function buildMalBadge(rating, template) {
+    // Reuse Plex's own class names (read from an existing IMDb/TMDB badge) so the MAL badge
+    // inherits their typography and spacing and sits beside them looking native.
+    const text = formatScore(rating);
+    const badge = document.createElement("span");
+    badge.id = MAL_BADGE_ID;
+    badge.className = template.className;
+    badge.title = `${rating.source} score ${text}`;
+
+    const number = document.createElement("span");
+    const numberTemplate = template.querySelector("span");
+    number.className = numberTemplate ? numberTemplate.className : "";
+    number.textContent = `${rating.source} ${text}`;
+
+    badge.append(number);
+    return badge;
+  }
+
+  function removeMalBadge() {
+    document.getElementById(MAL_BADGE_ID)?.remove();
+  }
+
+  // Place the MAL score beside Plex's IMDb/TMDB badges. Returns true when it was placed
+  // there, false when there is no ratings block to place it in (caller then uses our row).
+  function placeMalBadge(rating) {
+    removeMalBadge();
+    if (!rating) {
+      return false;
+    }
+
+    const slot = findRatingsSlot();
+    if (!slot) {
+      return false;
+    }
+
+    slot.container.append(buildMalBadge(rating, slot.template));
+    return true;
+  }
+
+  // Keep the badge in sync when Plex re-renders its ratings row (which can drop our badge or
+  // reveal the block late): (re)insert it when there is a slot, otherwise show it in our row.
+  function reconcileRating(row) {
+    if (!lastRating) {
+      return;
+    }
+
+    const slot = findRatingsSlot();
+    const rowPill = document.getElementById(ROW_RATING_ID);
+
+    if (slot) {
+      if (!document.getElementById(MAL_BADGE_ID)) {
+        slot.container.append(buildMalBadge(lastRating, slot.template));
+      }
+      rowPill?.remove();
+    } else {
+      removeMalBadge();
+      if (!rowPill && row) {
+        row.append(buildRatingPill(lastRating));
+      }
+    }
+  }
+
+  function buildRatingPill(rating) {
+    const pill = buildPill("Rating", formatRating(rating), ` ${rating.source}`);
+    pill.id = ROW_RATING_ID;
+    return pill;
   }
 
   function formatAirDate(date) {
@@ -306,9 +381,19 @@
       return cached.value;
     }
 
-    const result =
-      (await fetchFromTvmaze(context).catch(() => null)) ||
-      (await fetchFromAniList(context).catch(() => null));
+    // Query both sources together: TVmaze has the better season/episode air-date structure,
+    // while AniList both detects anime (it only lists anime) and carries the MAL score.
+    const [tvmaze, anilist] = await Promise.all([
+      fetchFromTvmaze(context).catch(() => null),
+      fetchFromAniList(context).catch(() => null)
+    ]);
+
+    const result = tvmaze || anilist;
+    if (result && anilist?.rating) {
+      // An AniList match means the title is anime, so prefer its MAL score for the rating
+      // even when the air dates themselves came from TVmaze.
+      result.rating = anilist.rating;
+    }
 
     setCached(cacheKey, result);
     return result;
@@ -345,14 +430,6 @@
     const embedded = showWithEpisodes?._embedded;
     const now = new Date();
 
-    // Prefer the IMDb rating (via OMDb, keyed on the IMDb id TVmaze exposes); fall back to
-    // TVmaze's own aggregate user rating, which is also on a 0-10 scale.
-    const imdbRating = await fetchOmdbRating(showWithEpisodes?.externals?.imdb).catch(() => null);
-    const ratingAverage = showWithEpisodes?.rating?.average;
-    const tvmazeRating =
-      typeof ratingAverage === "number" ? { score: ratingAverage, max: 10, source: "TVmaze" } : null;
-    const rating = imdbRating || tvmazeRating;
-
     const next = toTvmazeEpisode(embedded?.nextepisode);
     const nextEpisode = next && next.airDate > now ? next : null;
 
@@ -372,13 +449,12 @@
       seasonAired = await fetchTvmazeSeasonPremiere(show.id, context.season).catch(() => null);
     }
 
-    if (!nextEpisode && !latestEpisode && !currentEpisode && !seasonAired && !rating) {
+    if (!nextEpisode && !latestEpisode && !currentEpisode && !seasonAired) {
       return null;
     }
 
     return {
       source: "TVmaze",
-      rating,
       current: currentEpisode,
       latest: latestEpisode,
       next: nextEpisode,
@@ -531,34 +607,6 @@
     };
   }
 
-  async function fetchOmdbRating(imdbId) {
-    if (!OMDB_API_KEYS.length || !imdbId) {
-      return null;
-    }
-
-    // Start at a random key so requests spread across the keys' daily quotas, then try the
-    // rest in turn: a key that has hit its limit answers 401, so we fall through to the next
-    // one and only give up once every key is exhausted (~1000 requests/day per key).
-    const start = Math.floor(Math.random() * OMDB_API_KEYS.length);
-    for (let offset = 0; offset < OMDB_API_KEYS.length; offset++) {
-      const apikey = OMDB_API_KEYS[(start + offset) % OMDB_API_KEYS.length];
-      const params = new URLSearchParams({ apikey, i: imdbId });
-      const response = await fetch(`https://www.omdbapi.com/?${params.toString()}`, {
-        credentials: "omit"
-      });
-      if (!response.ok) {
-        continue;
-      }
-
-      const payload = await response.json();
-      // OMDb returns imdbRating as a string like "8.5", or "N/A" when it has no score.
-      const score = Number.parseFloat(payload?.imdbRating);
-      return Number.isFinite(score) ? { score, max: 10, source: "IMDb" } : null;
-    }
-
-    return null;
-  }
-
   async function fetchMalScore(idMal) {
     // Jikan is the unofficial MyAnimeList API; data.score is MAL's rating on a 0-10 scale.
     const response = await fetch(`https://api.jikan.moe/v4/anime/${idMal}`, {
@@ -684,23 +732,32 @@
     );
   }
 
+  function clearOutput() {
+    removeRow();
+    removeMalBadge();
+    lastRating = null;
+  }
+
   async function render() {
     pendingRender = 0;
 
     if (!isLikelyPlexPage()) {
-      removeRow();
+      clearOutput();
       lastPageKey = "";
       return;
     }
 
     const context = getMetadataContext();
     if (!context) {
-      removeRow();
+      clearOutput();
       lastPageKey = "";
       return;
     }
 
     if (context.pageKey === lastPageKey && document.getElementById(ROW_ID)) {
+      // Same page and our row is still there: only reconcile the MAL badge, since Plex may
+      // have re-rendered its ratings row underneath us.
+      reconcileRating(document.getElementById(ROW_ID));
       return;
     }
 
@@ -712,7 +769,7 @@
 
     const airInfo = await fetchAirInfo(context);
     if (!airInfo) {
-      removeRow();
+      clearOutput();
       return;
     }
 
@@ -721,7 +778,11 @@
       return;
     }
 
-    setRow(row, airInfo);
+    lastRating = airInfo.rating || null;
+    // Prefer placing the MAL score beside Plex's IMDb/TMDB badges; only fall back to our own
+    // row line when this page has no ratings block to place it in.
+    const placedBeside = placeMalBadge(airInfo.rating);
+    setRow(row, airInfo, Boolean(airInfo.rating) && !placedBeside);
   }
 
   function scheduleRender() {
