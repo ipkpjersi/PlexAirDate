@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Plex Air Date",
-  "version": "0.3.1",
-  "description": "Adds episode air dates to Plex show, season, and episode pages, showing the current, latest, and next episode air dates plus when a season aired.",
+  "version": "0.4.0",
+  "description": "Adds episode air dates and a rating to Plex show, season, and episode pages, showing the current, latest, and next episode air dates, when a season aired, plus the MAL score for anime and the IMDb rating for everything else.",
   "permissions": [],
   "host_permissions": [
     "https://api.tvmaze.com/*",
-    "https://graphql.anilist.co/*"
+    "https://graphql.anilist.co/*",
+    "https://api.jikan.moe/*",
+    "https://www.omdbapi.com/*"
   ],
   "content_scripts": [
     {

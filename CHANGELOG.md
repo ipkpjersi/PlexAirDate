@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.4.0
+
+- Added a "Rating" line to show, season, and episode pages. For anime it shows the MyAnimeList (MAL) score, and for everything else it shows the IMDb rating, both out of 10. The source of the rating is shown next to it, so you can always see whether the score came from MAL, IMDb, AniList, or TVmaze.
+
 ## 0.3.1
 
 - Season pages now show just the year as the first line, instead of a "Season aired" line.

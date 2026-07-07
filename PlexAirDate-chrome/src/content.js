@@ -1,6 +1,25 @@
 (() => {
   const ROW_ID = "plex-air-date-row";
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+  // The OMDb API keys (used for IMDb ratings on non-anime titles) are stored XOR-obfuscated
+  // rather than as plaintext strings, so automated scrapers that crawl public repos and
+  // extension bundles for API keys cannot grab them. This is obfuscation, not encryption: a
+  // client-side extension has to rebuild the keys at runtime to call OMDb, so anyone reading
+  // the code or watching network traffic can still recover them. We ship more than one key
+  // and pick one at random per request to spread load across their daily quotas (each free
+  // key allows ~1000 requests/day). To use your own keys, XOR each character code against
+  // OMDB_KEY_MASK (repeating) to regenerate a cipher, or empty OMDB_KEY_CIPHERS to fall back
+  // to the TVmaze rating instead.
+  const OMDB_KEY_MASK = [0x5a, 0x3c, 0x27, 0x6e];
+  const OMDB_KEY_CIPHERS = [
+    [56, 12, 18, 91, 99, 95, 70, 12],
+    [62, 95, 21, 87, 111, 11, 65, 91]
+  ];
+  const OMDB_API_KEYS = OMDB_KEY_CIPHERS.map((cipher) =>
+    cipher
+      .map((code, index) => String.fromCharCode(code ^ OMDB_KEY_MASK[index % OMDB_KEY_MASK.length]))
+      .join("")
+  ).filter(Boolean);
   const cache = new Map();
 
   let pendingRender = 0;
@@ -178,6 +197,13 @@
       titleParts.push(yearText);
     }
 
+    if (data.rating) {
+      // Show-level rating: MAL score for anime, TVmaze rating for everything else.
+      const text = formatRating(data.rating);
+      row.append(buildPill("Rating", text, ` ${data.rating.source}`));
+      titleParts.push(`Rating: ${text} ${data.rating.source}`);
+    }
+
     if (data.current) {
       const text = formatEpisode(data.current, airVerb(data.current.airDate));
       row.append(buildPill("Current episode", text, source));
@@ -233,6 +259,10 @@
 
     parts.push(`${verb} ${formatAirDate(episode.airDate)}`);
     return parts.join(" ");
+  }
+
+  function formatRating(rating) {
+    return `${rating.score.toFixed(1)} / ${rating.max}`;
   }
 
   function formatAirDate(date) {
@@ -315,6 +345,14 @@
     const embedded = showWithEpisodes?._embedded;
     const now = new Date();
 
+    // Prefer the IMDb rating (via OMDb, keyed on the IMDb id TVmaze exposes); fall back to
+    // TVmaze's own aggregate user rating, which is also on a 0-10 scale.
+    const imdbRating = await fetchOmdbRating(showWithEpisodes?.externals?.imdb).catch(() => null);
+    const ratingAverage = showWithEpisodes?.rating?.average;
+    const tvmazeRating =
+      typeof ratingAverage === "number" ? { score: ratingAverage, max: 10, source: "TVmaze" } : null;
+    const rating = imdbRating || tvmazeRating;
+
     const next = toTvmazeEpisode(embedded?.nextepisode);
     const nextEpisode = next && next.airDate > now ? next : null;
 
@@ -334,12 +372,13 @@
       seasonAired = await fetchTvmazeSeasonPremiere(show.id, context.season).catch(() => null);
     }
 
-    if (!nextEpisode && !latestEpisode && !currentEpisode && !seasonAired) {
+    if (!nextEpisode && !latestEpisode && !currentEpisode && !seasonAired && !rating) {
       return null;
     }
 
     return {
       source: "TVmaze",
+      rating,
       current: currentEpisode,
       latest: latestEpisode,
       next: nextEpisode,
@@ -403,6 +442,8 @@
       query PlexAirDate($search: String) {
         Media(search: $search, type: ANIME) {
           id
+          idMal
+          averageScore
           synonyms
           title {
             english
@@ -467,17 +508,69 @@
       latestEpisode = await fetchAniListLastAired(media.id).catch(() => null);
     }
 
-    if (!nextEpisode && !latestEpisode && !currentEpisode) {
+    // Prefer the real MAL score (via Jikan); fall back to AniList's own averageScore.
+    let rating = null;
+    if (media?.idMal) {
+      rating = await fetchMalScore(media.idMal).catch(() => null);
+    }
+    if (!rating && typeof media?.averageScore === "number") {
+      rating = { score: media.averageScore / 10, max: 10, source: "AniList" };
+    }
+
+    if (!nextEpisode && !latestEpisode && !currentEpisode && !rating) {
       return null;
     }
 
     return {
       source: "AniList",
+      rating,
       current: currentEpisode,
       latest: latestEpisode,
       next: nextEpisode,
       seasonAired: null
     };
+  }
+
+  async function fetchOmdbRating(imdbId) {
+    if (!OMDB_API_KEYS.length || !imdbId) {
+      return null;
+    }
+
+    // Start at a random key so requests spread across the keys' daily quotas, then try the
+    // rest in turn: a key that has hit its limit answers 401, so we fall through to the next
+    // one and only give up once every key is exhausted (~1000 requests/day per key).
+    const start = Math.floor(Math.random() * OMDB_API_KEYS.length);
+    for (let offset = 0; offset < OMDB_API_KEYS.length; offset++) {
+      const apikey = OMDB_API_KEYS[(start + offset) % OMDB_API_KEYS.length];
+      const params = new URLSearchParams({ apikey, i: imdbId });
+      const response = await fetch(`https://www.omdbapi.com/?${params.toString()}`, {
+        credentials: "omit"
+      });
+      if (!response.ok) {
+        continue;
+      }
+
+      const payload = await response.json();
+      // OMDb returns imdbRating as a string like "8.5", or "N/A" when it has no score.
+      const score = Number.parseFloat(payload?.imdbRating);
+      return Number.isFinite(score) ? { score, max: 10, source: "IMDb" } : null;
+    }
+
+    return null;
+  }
+
+  async function fetchMalScore(idMal) {
+    // Jikan is the unofficial MyAnimeList API; data.score is MAL's rating on a 0-10 scale.
+    const response = await fetch(`https://api.jikan.moe/v4/anime/${idMal}`, {
+      credentials: "omit"
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const score = payload?.data?.score;
+    return typeof score === "number" ? { score, max: 10, source: "MAL" } : null;
   }
 
   async function fetchAniListEpisode(mediaId, episodeNumber) {
