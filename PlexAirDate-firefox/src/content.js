@@ -8,6 +8,11 @@
   const cache = new Map();
   // Resolved AniList "season N -> MAL entry" lookups (each anime season is its own MAL entry).
   const seasonEntryCache = new Map();
+  // MAL /full lookups keyed by MAL id, used by the AniList-independent season walk. Each value is
+  // a node { malId, format, episodes, score, sequels, prequels } (or null for a genuine miss).
+  const malFullCache = new Map();
+  // Resolved MAL "base entry + season N -> season entry" lookups for that same walk.
+  const malSeasonEntryCache = new Map();
 
   let pendingRender = 0;
   let lastPageKey = "";
@@ -216,8 +221,8 @@
     }
 
     if (data.rating) {
-      // Anime score (MAL, or AniList as a fallback), shown below the airing info. Plex
-      // already displays IMDb/TMDB scores elsewhere, so we only add a rating for anime.
+      // Anime score (MAL, with AniList and then TVmaze as fallbacks), shown below the airing
+      // info. Plex already displays IMDb/TMDB scores elsewhere, so we only add a rating for anime.
       row.append(buildRatingLine(data.rating));
       titleParts.push(`${data.rating.source}: ${formatRating(data.rating)}`);
     }
@@ -253,7 +258,7 @@
   }
 
   function buildRatingLine(rating, tag) {
-    // The anime score line: the MAL logo (or the source name for the AniList fallback)
+    // The anime score line: the MAL logo (or the source name for the AniList/TVmaze fallbacks)
     // followed by the score, all in white so it reads as its own distinct line. An optional
     // tag (e.g. "EP") distinguishes the per-episode score from the series score.
     const line = document.createElement("span");
@@ -364,18 +369,47 @@
     // data); treat that as "no AniList result" when merging, but remember it for the TTL below.
     const anilistData = anilist?.source ? anilist : null;
     const result = tvmaze || anilistData;
-    if (result && anilist?.rating) {
-      // An AniList match means the title is anime, so prefer its MAL score for the rating
-      // even when the air dates themselves came from TVmaze.
-      result.rating = anilist.rating;
+
+    // Resolve the anime score with independent fallbacks so no single API is a point of failure:
+    //   1. AniList lookup (MAL score via its idMal, or AniList's own averageScore) - the best
+    //      source because it resolves the exact per-season entry.
+    //   2. A direct MAL/Jikan lookup by title - independent of AniList, so it still yields a real
+    //      MAL score when AniList is rate limited (AniList otherwise supplies the MAL id).
+    //   3. TVmaze's own rating.average (already on the result) as a last resort.
+    let failed = Boolean(anilist?.failed);
+    if (result) {
+      if (anilist?.rating) {
+        // An AniList match means the title is anime, so prefer its MAL score (or AniList's own
+        // averageScore) even when the air dates themselves came from TVmaze.
+        result.rating = anilist.rating;
+      } else if (anilist === null) {
+        // AniList responded and the title is not anime, so drop TVmaze's general rating and stay
+        // anime-only (Plex already shows IMDb/TMDB scores for non-anime).
+        result.rating = null;
+      } else {
+        // AniList matched the title as anime but had no score, or AniList was unavailable (rate
+        // limited, so we never got the idMal or averageScore). Try MAL directly by title before
+        // settling for the TVmaze rating already on the result.
+        const direct = await fetchMalByTitle(context).catch(() => null);
+        if (direct?.rating) {
+          result.rating = direct.rating;
+          failed = false;
+        } else if (direct?.failed) {
+          failed = true;
+        }
+        if (!result.episodeRating && direct?.episodeRating) {
+          result.episodeRating = direct.episodeRating;
+        }
+      }
     }
     if (result && anilist?.episodeRating) {
       result.episodeRating = anilist.episodeRating;
     }
 
-    // Cache a lookup whose AniList/MAL half hit a rate limit only briefly, so a transient
-    // failure does not hide the score for the full TTL; complete lookups cache for the full TTL.
-    setCached(cacheKey, result, anilist?.failed ? NEGATIVE_CACHE_TTL_MS : CACHE_TTL_MS);
+    // Cache a lookup whose score sources all hit a rate limit only briefly, so a transient failure
+    // does not hide the score for the full TTL; a lookup that produced a real score (or positively
+    // ruled out anime) caches for the full TTL.
+    setCached(cacheKey, result, failed ? NEGATIVE_CACHE_TTL_MS : CACHE_TTL_MS);
     return result;
   }
 
@@ -410,6 +444,15 @@
     const embedded = showWithEpisodes?._embedded;
     const now = new Date();
 
+    // TVmaze's own average rating (already on a 0-10 scale) is kept as a last-resort score,
+    // used only when the anime's MAL/AniList score is unavailable (see fetchAirInfo). null
+    // means the show has no rating yet.
+    const tvmazeAverage = showWithEpisodes?.rating?.average;
+    const rating =
+      typeof tvmazeAverage === "number" && tvmazeAverage > 0
+        ? { score: tvmazeAverage, max: 10, source: "TVmaze" }
+        : null;
+
     const next = toTvmazeEpisode(embedded?.nextepisode);
     const nextEpisode = next && next.airDate > now ? next : null;
 
@@ -435,6 +478,7 @@
 
     return {
       source: "TVmaze",
+      rating,
       current: currentEpisode,
       latest: latestEpisode,
       next: nextEpisode,
@@ -693,6 +737,197 @@
     // Jikan returns 0 (not null) for an anime with no score yet, so treat 0 as "no score"
     // and let the caller fall back to the AniList average.
     return typeof score === "number" && score > 0 ? { score, max: 10, source: "MAL" } : null;
+  }
+
+  // A MAL entry counts as a numbered season only if it is a TV or ONA (newer seasons often stream
+  // as ONAs); movies/OVAs/specials are not numbered like a continuing season. Mirrors the AniList
+  // season walk's format filter.
+  function isMalSeasonFormat(format) {
+    return format === "TV" || format === "ONA";
+  }
+
+  async function fetchMalFull(malId) {
+    // One Jikan /full call yields this entry's format/episodes/score AND its relation graph, so the
+    // season walk needs a single request per hop (like the AniList neighbors query). Cached by id.
+    if (malFullCache.has(malId)) {
+      return malFullCache.get(malId);
+    }
+
+    const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${malId}/full`);
+    if (!response.ok) {
+      // A rate-limit/server error is transient: throw so the walk aborts without caching a wrong
+      // result, and retries on a later view. A genuine miss (e.g. 404) is cached as "no entry".
+      if (JIKAN_RETRY_STATUSES.has(response.status)) {
+        throw new Error(`Jikan full failed with status ${response.status}`);
+      }
+      malFullCache.set(malId, null);
+      return null;
+    }
+
+    const data = (await response.json())?.data;
+    if (!data) {
+      malFullCache.set(malId, null);
+      return null;
+    }
+
+    const relations = Array.isArray(data.relations) ? data.relations : [];
+    const idsFor = (relationName) =>
+      relations
+        .filter((relation) => relation?.relation === relationName)
+        .flatMap((relation) => (relation.entry || []).filter((entry) => entry?.type === "anime"))
+        .map((entry) => entry.mal_id)
+        .filter((id) => typeof id === "number");
+
+    const node = {
+      malId,
+      format: data.type || null,
+      episodes: typeof data.episodes === "number" ? data.episodes : null,
+      // Jikan returns 0 (not null) for an anime with no score yet, so treat 0 as "no score".
+      score: typeof data.score === "number" && data.score > 0 ? data.score : null,
+      sequels: idsFor("Sequel"),
+      prequels: idsFor("Prequel")
+    };
+    malFullCache.set(malId, node);
+    return node;
+  }
+
+  async function pickMalNeighbor(candidateIds, seen) {
+    // A MAL entry can list several sequels/prequels (e.g. a TV continuation plus a movie); pick the
+    // first unseen TV/ONA one so the walk follows the main-line seasons. Cap the candidates checked
+    // to bound the number of Jikan calls.
+    for (const id of candidateIds.slice(0, 4)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      const neighbor = await fetchMalFull(id);
+      if (neighbor && isMalSeasonFormat(neighbor.format)) {
+        return neighbor;
+      }
+    }
+    return null;
+  }
+
+  async function resolveMalSeason(baseMalId, targetSeason) {
+    // The MAL-native equivalent of resolveSeasonMedia: follow prequels back to the franchise's first
+    // season, then walk sequels forward to the wanted Plex season, using MAL's own relation graph so
+    // it does not depend on AniList. Returns the resolved entry node, or null if the chain breaks.
+    const cacheKey = `${baseMalId}|${targetSeason}`;
+    if (malSeasonEntryCache.has(cacheKey)) {
+      return malSeasonEntryCache.get(cacheKey);
+    }
+
+    const base = await fetchMalFull(baseMalId);
+    if (!base) {
+      return null;
+    }
+
+    let node = base;
+    const seen = new Set([node.malId]);
+
+    // Walk prequels back to the first season. hop caps bound work; `seen` guards relation cycles.
+    for (let hop = 0; hop < 24; hop++) {
+      const prequel = await pickMalNeighbor(node.prequels, seen);
+      if (!prequel) {
+        break;
+      }
+      node = prequel;
+      seen.add(node.malId);
+    }
+
+    // Walk sequels forward to the target Plex season.
+    let result = node;
+    for (let season = 1; season < targetSeason; season++) {
+      const sequel = await pickMalNeighbor(result.sequels, seen);
+      if (!sequel) {
+        result = null;
+        break;
+      }
+      result = sequel;
+      seen.add(result.malId);
+    }
+
+    malSeasonEntryCache.set(cacheKey, result);
+    return result;
+  }
+
+  async function fetchMalByTitle(context) {
+    // A direct MAL lookup by title via Jikan, independent of AniList. AniList normally supplies the
+    // MAL id (and the score routes through it), so an AniList rate limit takes out the MAL score
+    // too; this path restores a real MAL score without touching AniList. Jikan lists only anime, so
+    // a confident title match also confirms the title is anime. Later seasons are resolved through
+    // MAL's own relation graph (resolveMalSeason), so this works on every season, not just the first.
+    const params = new URLSearchParams({ q: context.title, limit: "8" });
+    let response;
+    try {
+      response = await fetchJikan(`https://api.jikan.moe/v4/anime?${params.toString()}`);
+    } catch (error) {
+      // A network error after retries: signal a transient failure so the caller caches briefly.
+      return { failed: true };
+    }
+    if (!response.ok) {
+      // A rate-limit/server error (429/5xx) is transient; a plain miss (e.g. 404) is not.
+      return JIKAN_RETRY_STATUSES.has(response.status) ? { failed: true } : null;
+    }
+
+    const payload = await response.json();
+    const list = Array.isArray(payload?.data) ? payload.data : [];
+    const match = list.find((item) => {
+      const titles = [
+        item?.title,
+        item?.title_english,
+        item?.title_japanese,
+        ...(item?.titles || []).map((entry) => entry?.title)
+      ].filter(Boolean);
+      return titles.some((title) => isProbableTitleMatch(context.title, title));
+    });
+    if (!match?.mal_id) {
+      return null;
+    }
+
+    // Resolve the MAL entry for the Plex season being viewed. The searched match is the base entry
+    // (right for show pages and season 1); season/episode pages past season 1 walk MAL's relation
+    // graph to the correct per-season entry, matching what the AniList path does.
+    let entry = {
+      malId: match.mal_id,
+      episodes: typeof match.episodes === "number" ? match.episodes : null,
+      score: typeof match.score === "number" && match.score > 0 ? match.score : null
+    };
+    if (context.season && context.season > 1 && (context.type === "episode" || context.type === "season")) {
+      let resolved;
+      try {
+        resolved = await resolveMalSeason(match.mal_id, context.season);
+      } catch (error) {
+        // The relation walk hit a rate limit: signal a transient failure so the caller caches
+        // briefly and retries, rather than showing (or caching) a mismatched base-season score.
+        return { failed: true };
+      }
+      if (!resolved) {
+        // Could not resolve the season entry (broken chain); do not show a mismatched score.
+        return null;
+      }
+      entry = resolved;
+    }
+
+    let rating = entry.score ? { score: entry.score, max: 10, source: "MAL" } : null;
+    if (!rating && entry.malId) {
+      // The resolved entry carried no inline score (rare); ask MAL directly before giving up.
+      rating = await fetchMalScore(entry.malId).catch(() => null);
+    }
+
+    let episodeRating = null;
+    if (context.type === "episode" && context.episode) {
+      // Skip if the episode number does not fit the entry, so we do not show a mismatched score.
+      const fitsEntry = !entry.episodes || context.episode <= entry.episodes;
+      if (fitsEntry) {
+        episodeRating = await fetchMalEpisodeScore(entry.malId, context.episode).catch(() => null);
+      }
+    }
+
+    if (!rating && !episodeRating) {
+      return null;
+    }
+
+    return { rating, episodeRating };
   }
 
   async function fetchMalEpisodeScore(idMal, episode) {

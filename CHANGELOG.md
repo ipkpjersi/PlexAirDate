@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.5.0
+
+- Fixed the anime score sometimes disappearing entirely, leaving only the episode air dates. This happened because the MyAnimeList (MAL) score was only reachable through AniList, so whenever AniList was briefly rate-limited, or simply had no rating for that title, both the MAL score and the AniList score vanished together. The score now has independent fallbacks: if the usual lookup comes up empty, the extension asks MyAnimeList directly for the score (finding the correct entry for the season being viewed, so later seasons still show their own score), and if that is also unavailable it shows the TVmaze rating as a last resort, so a score reliably appears instead of none.
+
 ## 0.4.7
 
 - Fixed anime scores disappearing on later-season episodes (for example Himouto! Umaru-chan season 2 from episode 2 onward). When browsing through many episodes quickly, AniList would briefly rate-limit the extension, and that failed lookup was then remembered for hours, so those episodes showed the air dates but no MyAnimeList or AniList score. The extension now spaces out and retries AniList requests the same way it already does for MyAnimeList, and no longer caches a rate-limited lookup for long, so the score comes back on the next view instead of staying blank.
