@@ -1,6 +1,10 @@
 (() => {
   const ROW_ID = "plex-air-date-row";
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+  // A lookup whose AniList/MAL half hit a rate limit or transport error is cached only this
+  // long (not the full TTL) so a transient failure does not hide scores for hours; the next
+  // page view retries it.
+  const NEGATIVE_CACHE_TTL_MS = 2 * 60 * 1000;
   const cache = new Map();
   // Resolved AniList "season N -> MAL entry" lookups (each anime season is its own MAL entry).
   const seasonEntryCache = new Map();
@@ -323,7 +327,7 @@
     }
 
     const cached = cache.get(key);
-    if (Date.now() - cached.createdAt > CACHE_TTL_MS) {
+    if (Date.now() - cached.createdAt > cached.ttl) {
       cache.delete(key);
       return null;
     }
@@ -334,9 +338,10 @@
     };
   }
 
-  function setCached(key, value) {
+  function setCached(key, value, ttl = CACHE_TTL_MS) {
     cache.set(key, {
       createdAt: Date.now(),
+      ttl,
       value
     });
   }
@@ -352,10 +357,13 @@
     // while AniList both detects anime (it only lists anime) and carries the MAL score.
     const [tvmaze, anilist] = await Promise.all([
       fetchFromTvmaze(context).catch(() => null),
-      fetchFromAniList(context).catch(() => null)
+      fetchFromAniList(context).catch(() => ({ failed: true }))
     ]);
 
-    const result = tvmaze || anilist;
+    // AniList may return only a { failed: true } marker (a rate-limited search that produced no
+    // data); treat that as "no AniList result" when merging, but remember it for the TTL below.
+    const anilistData = anilist?.source ? anilist : null;
+    const result = tvmaze || anilistData;
     if (result && anilist?.rating) {
       // An AniList match means the title is anime, so prefer its MAL score for the rating
       // even when the air dates themselves came from TVmaze.
@@ -365,7 +373,9 @@
       result.episodeRating = anilist.episodeRating;
     }
 
-    setCached(cacheKey, result);
+    // Cache a lookup whose AniList/MAL half hit a rate limit only briefly, so a transient
+    // failure does not hide the score for the full TTL; complete lookups cache for the full TTL.
+    setCached(cacheKey, result, anilist?.failed ? NEGATIVE_CACHE_TTL_MS : CACHE_TTL_MS);
     return result;
   }
 
@@ -504,26 +514,24 @@
       }
     `;
 
-    const response = await fetch("https://graphql.anilist.co/", {
-      body: JSON.stringify({
-        query,
-        variables: {
-          search: context.title
-        }
-      }),
-      credentials: "omit",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      method: "POST"
-    });
+    // Any AniList/MAL request that throws (a rate limit or transport error, via the guard below)
+    // flips this flag, so the caller can cache the lookup only briefly and retry it soon.
+    const state = { failed: false };
+    const guard = (promise) =>
+      promise.catch(() => {
+        state.failed = true;
+        return null;
+      });
 
-    if (!response.ok) {
-      return null;
+    let payload;
+    try {
+      payload = await postAniList(query, { search: context.title });
+    } catch (error) {
+      // A rate-limited/failed search means we could not detect anime or read a score at all;
+      // signal the failure so this lookup is cached only briefly rather than as "no score".
+      return { failed: true };
     }
 
-    const payload = await response.json();
     const media = payload?.data?.Media;
     const titles = [
       media?.title?.english,
@@ -532,8 +540,25 @@
       ...(media?.synonyms || [])
     ].filter(Boolean);
 
-    if (!titles.some((title) => isProbableTitleMatch(context.title, title))) {
+    if (!media || !titles.some((title) => isProbableTitleMatch(context.title, title))) {
       return null;
+    }
+
+    // Resolve the MAL entry for the Plex season being viewed. Plex numbers episodes per season,
+    // but each anime season is its own MAL entry numbered from episode 1, so season and episode
+    // pages past season 1 walk the AniList sequel chain to the right entry and use it for both
+    // the series score and the per-episode score; show pages and season 1 use the searched entry.
+    let seasonMedia = media;
+    if (
+      media.id &&
+      context.season &&
+      context.season > 1 &&
+      (context.type === "episode" || context.type === "season")
+    ) {
+      const resolved = await guard(resolveSeasonMedia(media, context.season));
+      if (resolved) {
+        seasonMedia = resolved;
+      }
     }
 
     const now = new Date();
@@ -545,43 +570,38 @@
 
     let currentEpisode = null;
     let latestEpisode = null;
-    if (media?.id) {
+    if (seasonMedia?.id) {
       if (context.type === "episode" && context.episode) {
         // On an episode page, show the air date of the specific episode being viewed.
-        currentEpisode = await fetchAniListEpisode(media.id, context.episode).catch(() => null);
+        currentEpisode = await guard(fetchAniListEpisode(seasonMedia.id, context.episode));
       }
-      // The most recently aired episode of the matched title, shown on every page type.
-      latestEpisode = await fetchAniListLastAired(media.id).catch(() => null);
+      // The most recently aired episode of the resolved season, shown on every page type.
+      latestEpisode = await guard(fetchAniListLastAired(seasonMedia.id));
     }
 
-    // Prefer the real MAL score (via Jikan); fall back to AniList's own averageScore.
+    // Prefer the real MAL score (via Jikan) for the resolved season; fall back to AniList's own
+    // averageScore for that same season.
     let rating = null;
-    if (media?.idMal) {
-      rating = await fetchMalScore(media.idMal).catch(() => null);
+    if (seasonMedia?.idMal) {
+      rating = await guard(fetchMalScore(seasonMedia.idMal));
     }
-    if (!rating && typeof media?.averageScore === "number") {
-      rating = { score: media.averageScore / 10, max: 10, source: "AniList" };
+    if (!rating && typeof seasonMedia?.averageScore === "number") {
+      rating = { score: seasonMedia.averageScore / 10, max: 10, source: "AniList" };
     }
 
-    // MAL per-episode poll score, on episode pages. Plex numbers episodes per season, but each
-    // anime season is its own MAL entry numbered from episode 1, so resolve the entry for this
-    // Plex season by walking the AniList sequel chain, then look up the episode within it.
+    // MAL per-episode poll score, on episode pages, from the resolved season entry.
     let episodeRating = null;
-    if (media?.id && context.type === "episode" && context.episode) {
-      const seasonMedia =
-        context.season && context.season > 1
-          ? await resolveSeasonMedia(media, context.season).catch(() => null)
-          : { idMal: media.idMal, episodes: media.episodes };
+    if (context.type === "episode" && context.episode && seasonMedia?.idMal) {
       // Skip if the episode number does not fit the resolved entry (a sign the season chain
       // did not line up), so we do not show a mismatched score.
       const fitsEntry = !seasonMedia?.episodes || context.episode <= seasonMedia.episodes;
-      if (seasonMedia?.idMal && fitsEntry) {
-        episodeRating = await fetchMalEpisodeScore(seasonMedia.idMal, context.episode).catch(() => null);
+      if (fitsEntry) {
+        episodeRating = await guard(fetchMalEpisodeScore(seasonMedia.idMal, context.episode));
       }
     }
 
     if (!nextEpisode && !latestEpisode && !currentEpisode && !rating && !episodeRating) {
-      return null;
+      return state.failed ? { failed: true } : null;
     }
 
     return {
@@ -591,7 +611,8 @@
       current: currentEpisode,
       latest: latestEpisode,
       next: nextEpisode,
-      seasonAired: null
+      seasonAired: null,
+      failed: state.failed
     };
   }
 
@@ -693,6 +714,82 @@
       : null;
   }
 
+  // AniList's GraphQL API rate-limits (currently about 30 requests/minute, returning 429 with a
+  // Retry-After). Serialize requests through a shared queue so navigating quickly does not fire a
+  // burst, and retry a transient 429/5xx once with a bounded backoff. Unlike Jikan there is no
+  // base gap: a single page's AniList calls are already awaited in sequence, so adding a gap would
+  // only slow the first render without meaningfully helping the per-minute budget.
+  const ANILIST_MAX_ATTEMPTS = 2;
+  const ANILIST_MAX_BACKOFF_MS = 1500;
+  const ANILIST_RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+  let aniListQueue = Promise.resolve();
+
+  function aniListFetch(url, options) {
+    // Chain onto the previous call so only one AniList request is in flight at a time.
+    const run = aniListQueue.then(async () => {
+      for (let attempt = 1; attempt <= ANILIST_MAX_ATTEMPTS; attempt++) {
+        let response;
+        try {
+          response = await fetch(url, options);
+        } catch (error) {
+          // Network error: retry once with a backoff unless this was the last attempt.
+          if (attempt === ANILIST_MAX_ATTEMPTS) {
+            throw error;
+          }
+          await sleep(ANILIST_MAX_BACKOFF_MS);
+          continue;
+        }
+
+        // Retry rate-limit and transient server errors; return anything else as-is for the
+        // caller to handle.
+        if (response.ok || !ANILIST_RETRY_STATUSES.has(response.status) || attempt === ANILIST_MAX_ATTEMPTS) {
+          return response;
+        }
+
+        // Honour a Retry-After header when present, otherwise back off; cap the wait so a
+        // rate-limited page fails fast and recovers via the short negative cache instead of
+        // blocking the render for the full reset window.
+        const retryAfter = Number.parseFloat(response.headers.get("Retry-After") || "");
+        const backoff =
+          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : ANILIST_MAX_BACKOFF_MS;
+        await sleep(Math.min(backoff, ANILIST_MAX_BACKOFF_MS));
+      }
+
+      // The loop always returns or throws above; this satisfies the return-a-Response contract.
+      return fetch(url, options);
+    });
+
+    // Keep the queue chain alive even if this request rejects, so later calls still run.
+    aniListQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  async function postAniList(query, variables) {
+    const response = await aniListFetch("https://graphql.anilist.co/", {
+      body: JSON.stringify({ query, variables }),
+      credentials: "omit",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      method: "POST"
+    });
+
+    // Treat a rate-limit/server error (after the retries above) as a transport failure so callers
+    // can flag it and cache the lookup only briefly; a non-retryable non-2xx just yields no data.
+    if (ANILIST_RETRY_STATUSES.has(response.status)) {
+      throw new Error(`AniList request failed with status ${response.status}`);
+    }
+    if (!response.ok) {
+      return null;
+    }
+
+    return response.json();
+  }
+
   async function fetchAniListNeighbors(mediaId) {
     // The immediate TV prequel/sequel of an AniList entry, used to walk a franchise's seasons.
     const query = `
@@ -706,6 +803,7 @@
                 idMal
                 format
                 episodes
+                averageScore
               }
             }
           }
@@ -713,21 +811,7 @@
       }
     `;
 
-    const response = await fetch("https://graphql.anilist.co/", {
-      body: JSON.stringify({ query, variables: { id: mediaId } }),
-      credentials: "omit",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      method: "POST"
-    });
-
-    if (!response.ok) {
-      return { sequel: null, prequel: null };
-    }
-
-    const payload = await response.json();
+    const payload = await postAniList(query, { id: mediaId });
     const edges = payload?.data?.Media?.relations?.edges || [];
     // Follow the main-line seasons only: TV or ONA (newer seasons often stream as ONAs), never
     // movies/OVAs/specials, which are not numbered like a continuing season.
@@ -785,27 +869,7 @@
       }
     `;
 
-    const response = await fetch("https://graphql.anilist.co/", {
-      body: JSON.stringify({
-        query,
-        variables: {
-          mediaId,
-          episode: episodeNumber
-        }
-      }),
-      credentials: "omit",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      method: "POST"
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = await response.json();
+    const payload = await postAniList(query, { mediaId, episode: episodeNumber });
     const schedule = payload?.data?.Page?.airingSchedules?.[0];
     if (!schedule?.airingAt) {
       return null;
@@ -830,26 +894,7 @@
       }
     `;
 
-    const response = await fetch("https://graphql.anilist.co/", {
-      body: JSON.stringify({
-        query,
-        variables: {
-          mediaId
-        }
-      }),
-      credentials: "omit",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      method: "POST"
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = await response.json();
+    const payload = await postAniList(query, { mediaId });
     const schedule = payload?.data?.Page?.airingSchedules?.[0];
     if (!schedule?.airingAt) {
       return null;

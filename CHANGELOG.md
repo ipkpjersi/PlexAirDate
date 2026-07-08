@@ -2,6 +2,11 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.4.7
+
+- Fixed anime scores disappearing on later-season episodes (for example Himouto! Umaru-chan season 2 from episode 2 onward). When browsing through many episodes quickly, AniList would briefly rate-limit the extension, and that failed lookup was then remembered for hours, so those episodes showed the air dates but no MyAnimeList or AniList score. The extension now spaces out and retries AniList requests the same way it already does for MyAnimeList, and no longer caches a rate-limited lookup for long, so the score comes back on the next view instead of staying blank.
+- Fixed the series score on season pages past the first showing the first season's score. Each anime season is its own entry, so a second-season page now shows the second season's own MyAnimeList score rather than season one's.
+
 ## 0.4.6
 
 - Anime scores now load faster on the first view of an episode. The short spacing added between MyAnimeList requests in the previous version has been reduced, so the score and per-episode score appear more quickly while still avoiding rate limits.
