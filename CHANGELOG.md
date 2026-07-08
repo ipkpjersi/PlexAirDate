@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.4.6
+
+- Anime scores now load faster on the first view of an episode. The short spacing added between MyAnimeList requests in the previous version has been reduced, so the score and per-episode score appear more quickly while still avoiding rate limits.
+
 ## 0.4.5
 
 - Fixed the anime series score sometimes showing the AniList score instead of the MyAnimeList (MAL) score, even when MAL had a score. This happened when MyAnimeList briefly rate-limited the extension while it was also fetching the per-episode score. The extension now spaces out and retries those requests, so the correct MAL score shows reliably.

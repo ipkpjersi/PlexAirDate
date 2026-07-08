@@ -599,8 +599,10 @@
   // and 60/minute) and intermittently returns 429/5xx. Serialize its requests behind a shared
   // queue spaced at least JIKAN_MIN_GAP_MS apart so back-to-back calls do not trip the limit,
   // and retry transient failures so a single hiccup does not silently demote a real MAL score
-  // to the AniList fallback.
-  const JIKAN_MIN_GAP_MS = 1000;
+  // to the AniList fallback. The 3/second limit is a ~333ms floor, so 350ms keeps us just under
+  // it while adding as little first-render latency as possible; the retry/backoff covers the
+  // occasional 429 that still slips through.
+  const JIKAN_MIN_GAP_MS = 350;
   const JIKAN_MAX_ATTEMPTS = 3;
   const JIKAN_RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
   let jikanQueue = Promise.resolve();
