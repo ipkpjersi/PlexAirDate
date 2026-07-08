@@ -2,6 +2,8 @@
   const ROW_ID = "plex-air-date-row";
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const cache = new Map();
+  // Resolved AniList "season N -> MAL entry" lookups (each anime season is its own MAL entry).
+  const seasonEntryCache = new Map();
 
   let pendingRender = 0;
   let lastPageKey = "";
@@ -561,12 +563,21 @@
       rating = { score: media.averageScore / 10, max: 10, source: "AniList" };
     }
 
-    // The MAL per-episode poll score, only on season-1 episode pages: we match the anime by
-    // show title (one MAL entry), and Plex's episode number lines up with that entry only for
-    // season 1. For later seasons Plex points at a different MAL entry, so we skip it.
+    // MAL per-episode poll score, on episode pages. Plex numbers episodes per season, but each
+    // anime season is its own MAL entry numbered from episode 1, so resolve the entry for this
+    // Plex season by walking the AniList sequel chain, then look up the episode within it.
     let episodeRating = null;
-    if (media?.idMal && context.type === "episode" && context.season === 1 && context.episode) {
-      episodeRating = await fetchMalEpisodeScore(media.idMal, context.episode).catch(() => null);
+    if (media?.id && context.type === "episode" && context.episode) {
+      const seasonMedia =
+        context.season && context.season > 1
+          ? await resolveSeasonMedia(media, context.season).catch(() => null)
+          : { idMal: media.idMal, episodes: media.episodes };
+      // Skip if the episode number does not fit the resolved entry (a sign the season chain
+      // did not line up), so we do not show a mismatched score.
+      const fitsEntry = !seasonMedia?.episodes || context.episode <= seasonMedia.episodes;
+      if (seasonMedia?.idMal && fitsEntry) {
+        episodeRating = await fetchMalEpisodeScore(seasonMedia.idMal, context.episode).catch(() => null);
+      }
     }
 
     if (!nextEpisode && !latestEpisode && !currentEpisode && !rating && !episodeRating) {
@@ -619,6 +630,86 @@
     return typeof score === "number" && score > 0
       ? { score: (score / 5) * 10, max: 10, source: "MAL", perEpisode: true }
       : null;
+  }
+
+  async function fetchAniListNeighbors(mediaId) {
+    // The immediate TV prequel/sequel of an AniList entry, used to walk a franchise's seasons.
+    const query = `
+      query PlexAirDateRelations($id: Int) {
+        Media(id: $id) {
+          relations {
+            edges {
+              relationType
+              node {
+                id
+                idMal
+                format
+                episodes
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch("https://graphql.anilist.co/", {
+      body: JSON.stringify({ query, variables: { id: mediaId } }),
+      credentials: "omit",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      method: "POST"
+    });
+
+    if (!response.ok) {
+      return { sequel: null, prequel: null };
+    }
+
+    const payload = await response.json();
+    const edges = payload?.data?.Media?.relations?.edges || [];
+    // Follow the main-line seasons only: TV or ONA (newer seasons often stream as ONAs), never
+    // movies/OVAs/specials, which are not numbered like a continuing season.
+    const isSeason = (format) => format === "TV" || format === "ONA";
+    const pick = (relationType) =>
+      edges.find((edge) => edge?.relationType === relationType && isSeason(edge?.node?.format))?.node || null;
+
+    return { sequel: pick("SEQUEL"), prequel: pick("PREQUEL") };
+  }
+
+  async function resolveSeasonMedia(media, targetSeason) {
+    const cacheKey = `${media.id}|${targetSeason}`;
+    if (seasonEntryCache.has(cacheKey)) {
+      return seasonEntryCache.get(cacheKey);
+    }
+
+    // Follow prequels back to the franchise's first season, then walk sequels forward to the
+    // wanted Plex season. The `seen` set guards against relation cycles. hop caps bound work.
+    let node = { id: media.id, idMal: media.idMal, episodes: media.episodes };
+    const seen = new Set([node.id]);
+
+    for (let hop = 0; hop < 24; hop++) {
+      const { prequel } = await fetchAniListNeighbors(node.id);
+      if (!prequel || seen.has(prequel.id)) {
+        break;
+      }
+      node = prequel;
+      seen.add(node.id);
+    }
+
+    let result = node;
+    for (let season = 1; season < targetSeason; season++) {
+      const { sequel } = await fetchAniListNeighbors(result.id);
+      if (!sequel || seen.has(sequel.id)) {
+        result = null;
+        break;
+      }
+      result = sequel;
+      seen.add(sequel.id);
+    }
+
+    seasonEntryCache.set(cacheKey, result);
+    return result;
   }
 
   async function fetchAniListEpisode(mediaId, episodeNumber) {

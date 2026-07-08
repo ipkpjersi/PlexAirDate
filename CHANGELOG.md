@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.4.4
+
+- Anime per-episode MAL scores now work across all seasons, not just the first. Each anime season is a separate entry on MyAnimeList (including newer seasons released as web/streaming ONAs), and the extension now finds the right entry automatically, so the per-episode score also shows on later-season episodes.
+
 ## 0.4.3
 
 - Anime episode pages now also show the MyAnimeList per-episode score, taken from MAL's episode polls and converted to a score out of 10, tagged "EP" so it is not confused with the overall series score. It only appears when MAL has votes for that episode, and for now only on first-season episodes, where the episode numbers line up with MAL.
