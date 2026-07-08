@@ -595,11 +595,72 @@
     };
   }
 
+  // Jikan (the unofficial MyAnimeList API) rate-limits aggressively (about 3 requests/second
+  // and 60/minute) and intermittently returns 429/5xx. Serialize its requests behind a shared
+  // queue spaced at least JIKAN_MIN_GAP_MS apart so back-to-back calls do not trip the limit,
+  // and retry transient failures so a single hiccup does not silently demote a real MAL score
+  // to the AniList fallback.
+  const JIKAN_MIN_GAP_MS = 1000;
+  const JIKAN_MAX_ATTEMPTS = 3;
+  const JIKAN_RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+  let jikanQueue = Promise.resolve();
+  let jikanLastRequestAt = 0;
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function fetchJikan(url) {
+    // Chain onto the previous call so only one Jikan request is in flight at a time.
+    const run = jikanQueue.then(async () => {
+      for (let attempt = 1; attempt <= JIKAN_MAX_ATTEMPTS; attempt++) {
+        const wait = jikanLastRequestAt + JIKAN_MIN_GAP_MS - Date.now();
+        if (wait > 0) {
+          await sleep(wait);
+        }
+
+        let response;
+        try {
+          response = await fetch(url, { credentials: "omit" });
+        } catch (error) {
+          // Network error: retry with a growing backoff unless this was the last attempt.
+          jikanLastRequestAt = Date.now();
+          if (attempt === JIKAN_MAX_ATTEMPTS) {
+            throw error;
+          }
+          await sleep(JIKAN_MIN_GAP_MS * attempt);
+          continue;
+        }
+        jikanLastRequestAt = Date.now();
+
+        // Retry rate-limit and transient server errors; return anything else as-is (e.g. a
+        // 404, or a success) for the caller to handle.
+        if (response.ok || !JIKAN_RETRY_STATUSES.has(response.status) || attempt === JIKAN_MAX_ATTEMPTS) {
+          return response;
+        }
+
+        // Honour a Retry-After header when present, otherwise back off by the attempt count.
+        const retryAfter = Number.parseFloat(response.headers.get("Retry-After") || "");
+        const backoff =
+          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : JIKAN_MIN_GAP_MS * attempt;
+        await sleep(backoff);
+      }
+
+      // The loop always returns or throws above; this satisfies the return-a-Response contract.
+      return fetch(url, { credentials: "omit" });
+    });
+
+    // Keep the queue chain alive even if this request rejects, so later calls still run.
+    jikanQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
   async function fetchMalScore(idMal) {
     // Jikan is the unofficial MyAnimeList API; data.score is MAL's rating on a 0-10 scale.
-    const response = await fetch(`https://api.jikan.moe/v4/anime/${idMal}`, {
-      credentials: "omit"
-    });
+    const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${idMal}`);
     if (!response.ok) {
       return null;
     }
@@ -616,9 +677,7 @@
     // nullable 1.00-5.00 average, so fetch the page the episode falls on and match by number.
     const page = Math.floor((episode - 1) / 100) + 1;
     const params = new URLSearchParams({ page: String(page) });
-    const response = await fetch(`https://api.jikan.moe/v4/anime/${idMal}/episodes?${params.toString()}`, {
-      credentials: "omit"
-    });
+    const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${idMal}/episodes?${params.toString()}`);
     if (!response.ok) {
       return null;
     }
