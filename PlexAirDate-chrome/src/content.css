@@ -73,6 +73,13 @@
   font-weight: 600;
 }
 
+/* Diagnostic line shown in place of a missing anime score, in orange so a failed score lookup
+   (a rate limit, or an unmatched title) stands out and is easy to debug instead of showing nothing. */
+.plex-air-date-warning {
+  color: #ffa726;
+  font-weight: 600;
+}
+
 @media (prefers-color-scheme: light) {
   .plex-air-date-row {
     color: rgba(0, 0, 0, 0.7);
@@ -88,5 +95,10 @@
 
   .plex-air-date-source {
     color: rgba(0, 0, 0, 0.42);
+  }
+
+  /* A darker orange keeps the warning readable on Plex's light theme. */
+  .plex-air-date-warning {
+    color: #c75300;
   }
 }

@@ -234,6 +234,13 @@
       titleParts.push(`${data.episodeRating.source} episode: ${formatRating(data.episodeRating)}`);
     }
 
+    if (!data.rating && data.ratingNote && data.ratingNote.level === "warn") {
+      // No score was drawn: show the reason in orange instead of leaving the line blank, so a
+      // rate limit or an unmatched title is easy to spot when debugging rather than seeing nothing.
+      row.append(buildWarningLine(data.ratingNote.message));
+      titleParts.push(data.ratingNote.message);
+    }
+
     row.title = `${titleParts.join(" | ")}${source}`;
   }
 
@@ -289,6 +296,17 @@
     score.textContent = formatScore(rating);
     line.append(score);
 
+    return line;
+  }
+
+  function buildWarningLine(message) {
+    // An orange diagnostic line shown in place of a missing anime score, so a failed score lookup
+    // (a rate limit, or an unmatched title) is easy to spot when debugging instead of the line
+    // simply rendering empty, which gives no clue as to what went wrong.
+    const line = document.createElement("span");
+    line.className = "plex-air-date-warning";
+    line.textContent = message;
+    line.title = message;
     return line;
   }
 
@@ -404,6 +422,12 @@
     //   2. AniList's MAL score (via idMal) or its own averageScore - an independent fallback that
     //      also confirms the title is anime when MAL could not match it.
     //   3. TVmaze's own rating.average (already on the result) as a last resort.
+    // A diagnostic note explaining a missing score, surfaced by setRow as an orange warning so a
+    // blank score is never drawn silently. level "warn" is shown (a rate limit, or a total miss on
+    // an anime title); level "info" (a confident non-anime verdict, where no score is expected) is
+    // recorded for the tooltip but not drawn.
+    let ratingNote = null;
+
     if (malRating) {
       result.rating = malRating;
     } else if (anilist?.rating) {
@@ -415,13 +439,30 @@
       // AniList responded and the title is not anime (and MAL did not match it either), so drop
       // TVmaze's general rating and stay anime-only (Plex already shows IMDb/TMDB for non-anime).
       result.rating = null;
+      if (mal?.failed) {
+        // MAL was rate-limited, so its verdict is missing and AniList's "not anime" is unconfirmed;
+        // flag it for a quick retry and say why the score is blank rather than showing nothing.
+        failed = true;
+        ratingNote = { level: "warn", message: "MAL rate-limited, retrying soon." };
+      } else {
+        ratingNote = { level: "info", message: "No score: title not matched on MAL or AniList." };
+      }
     } else {
       // The title is anime (MAL and/or AniList matched it) but no source had a score, or every
       // score source was rate limited; keep the TVmaze rating already on the result as a last
       // resort, and remember a rate limit so the lookup is retried soon rather than cached for
       // hours.
       failed = failed || Boolean(anilist?.failed);
+      if (!result.rating) {
+        // Still nothing to show. Distinguish a transient rate limit (worth retrying) from a genuine
+        // absence of any MAL/AniList/TVmaze score, so the orange warning names the actual cause.
+        const rateLimited = Boolean(mal?.failed) || Boolean(anilist?.failed);
+        ratingNote = rateLimited
+          ? { level: "warn", message: "MAL/AniList rate-limited, retrying soon." }
+          : { level: "warn", message: "No MAL, AniList, or TVmaze rating found." };
+      }
     }
+    result.ratingNote = ratingNote;
 
     // Per-episode score: MAL's poll score preferred, from whichever path resolved it.
     const episodeRating = malEpisodeRating || anilist?.episodeRating || result.episodeRating || null;

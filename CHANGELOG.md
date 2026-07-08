@@ -2,6 +2,11 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.7.0
+
+- When an anime score cannot be shown, the extension now displays a short orange note explaining why (for example that MyAnimeList or AniList was briefly rate-limited and will be retried, or that the title could not be matched) instead of leaving the score line blank with no explanation. This makes it much easier to tell a temporary hiccup apart from a title that genuinely has no score.
+- Fixed the score sometimes staying blank on episode pages when both MyAnimeList and AniList were briefly rate-limited at the same time (seen while browsing quickly through an episode list). Those cases are now correctly treated as temporary and retried on the next view, and are labelled with the orange note above rather than showing nothing.
+
 ## 0.6.0
 
 - Made the MyAnimeList (MAL) score more reliable when AniList is rate-limited. The extension now asks MyAnimeList directly for the score first, instead of going through AniList to reach it, so a brief AniList rate limit no longer causes the score to drop down to the TVmaze rating. AniList is now only consulted when MyAnimeList cannot find the title or has no score, or when the air dates are missing, so on the usual anime page the score comes straight from MyAnimeList and does not depend on AniList at all. If MyAnimeList cannot supply a score, it still falls back to AniList and then to the TVmaze rating as before.
