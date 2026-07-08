@@ -4,7 +4,7 @@ All notable changes to Plex Air Date are listed here, newest first. Each entry m
 
 ## 0.5.0
 
-- Fixed the anime score sometimes disappearing entirely, leaving only the episode air dates. This happened because the MyAnimeList (MAL) score was only reachable through AniList, so whenever AniList was briefly rate-limited, or simply had no rating for that title, both the MAL score and the AniList score vanished together. The score now has independent fallbacks: if the usual lookup comes up empty, the extension asks MyAnimeList directly for the score, and if that is also unavailable it shows the TVmaze rating as a last resort, so a score reliably appears instead of none.
+- Fixed the anime score sometimes disappearing entirely, leaving only the episode air dates. This happened because the MyAnimeList (MAL) score was only reachable through AniList, so whenever AniList was briefly rate-limited, or simply had no rating for that title, both the MAL score and the AniList score vanished together. The score now has independent fallbacks: if the usual lookup comes up empty, the extension asks MyAnimeList directly for the score (finding the correct entry for the season being viewed, so later seasons still show their own score), and if that is also unavailable it shows the TVmaze rating as a last resort, so a score reliably appears instead of none.
 
 ## 0.4.7
 
