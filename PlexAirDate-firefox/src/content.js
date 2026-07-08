@@ -358,52 +358,75 @@
       return cached.value;
     }
 
-    // Query both sources together: TVmaze has the better season/episode air-date structure,
-    // while AniList both detects anime (it only lists anime) and carries the MAL score.
-    const [tvmaze, anilist] = await Promise.all([
+    // TVmaze supplies the season/episode air-date structure; MAL/Jikan is the PRIMARY anime score
+    // source, queried directly by title rather than through AniList. Both are independent of
+    // AniList, so an AniList rate limit can no longer demote a real MAL score to the TVmaze
+    // fallback. MAL/Jikan lists only anime, so a confident title match both detects anime and
+    // yields the real MAL score, and MAL's own relation graph resolves later seasons (see
+    // fetchMalByTitle/resolveMalSeason).
+    const [tvmaze, mal] = await Promise.all([
       fetchFromTvmaze(context).catch(() => null),
-      fetchFromAniList(context).catch(() => ({ failed: true }))
+      fetchMalByTitle(context).catch(() => null)
     ]);
 
-    // AniList may return only a { failed: true } marker (a rate-limited search that produced no
-    // data); treat that as "no AniList result" when merging, but remember it for the TTL below.
-    const anilistData = anilist?.source ? anilist : null;
-    const result = tvmaze || anilistData;
+    // A { failed: true } marker means MAL/Jikan hit a rate limit or transport error (no score was
+    // read), as opposed to a genuine "not found" (null). Track it so the lookup is cached briefly.
+    let failed = Boolean(mal?.failed);
+    const malRating = mal && !mal.failed ? mal.rating : null;
+    const malEpisodeRating = mal && !mal.failed ? mal.episodeRating : null;
 
-    // Resolve the anime score with independent fallbacks so no single API is a point of failure:
-    //   1. AniList lookup (MAL score via its idMal, or AniList's own averageScore) - the best
-    //      source because it resolves the exact per-season entry.
-    //   2. A direct MAL/Jikan lookup by title - independent of AniList, so it still yields a real
-    //      MAL score when AniList is rate limited (AniList otherwise supplies the MAL id).
-    //   3. TVmaze's own rating.average (already on the result) as a last resort.
-    let failed = Boolean(anilist?.failed);
-    if (result) {
-      if (anilist?.rating) {
-        // An AniList match means the title is anime, so prefer its MAL score (or AniList's own
-        // averageScore) even when the air dates themselves came from TVmaze.
-        result.rating = anilist.rating;
-      } else if (anilist === null) {
-        // AniList responded and the title is not anime, so drop TVmaze's general rating and stay
-        // anime-only (Plex already shows IMDb/TMDB scores for non-anime).
-        result.rating = null;
-      } else {
-        // AniList matched the title as anime but had no score, or AniList was unavailable (rate
-        // limited, so we never got the idMal or averageScore). Try MAL directly by title before
-        // settling for the TVmaze rating already on the result.
-        const direct = await fetchMalByTitle(context).catch(() => null);
-        if (direct?.rating) {
-          result.rating = direct.rating;
-          failed = false;
-        } else if (direct?.failed) {
-          failed = true;
-        }
-        if (!result.episodeRating && direct?.episodeRating) {
-          result.episodeRating = direct.episodeRating;
-        }
-      }
+    // Consult AniList ONLY when MAL did not resolve a score (a title MAL could not match, or a
+    // Jikan rate limit) or when TVmaze had no air dates to show. On the happy anime path - a MAL
+    // score plus TVmaze air dates - AniList is never queried, so it is no longer a point of failure
+    // for the primary lookup. It stays a useful fallback: its fuzzier search can match a title MAL
+    // missed, and it still detects anime and carries an averageScore.
+    let anilist = null;
+    if (!malRating || !tvmaze) {
+      anilist = await fetchFromAniList(context).catch(() => ({ failed: true }));
     }
-    if (result && anilist?.episodeRating) {
-      result.episodeRating = anilist.episodeRating;
+    // AniList may return only a { failed: true } marker (a rate-limited search that produced no
+    // data); treat that as "no AniList result" when merging for the air dates.
+    const anilistData = anilist?.source ? anilist : null;
+
+    // Air dates: prefer TVmaze's structure, fall back to AniList's airing schedule.
+    const result = tvmaze || anilistData;
+    if (!result) {
+      // Neither air-date source produced anything (a MAL score with no air dates has nothing to
+      // anchor to). Cache the miss - briefly if a rate limit was the reason - and give up.
+      failed = failed || Boolean(anilist?.failed);
+      setCached(cacheKey, null, failed ? NEGATIVE_CACHE_TTL_MS : CACHE_TTL_MS);
+      return null;
+    }
+
+    // Resolve the anime score, MAL first, so no single API is a point of failure:
+    //   1. MAL/Jikan score by title (the primary path above) - a real per-season MAL score,
+    //      independent of AniList.
+    //   2. AniList's MAL score (via idMal) or its own averageScore - an independent fallback that
+    //      also confirms the title is anime when MAL could not match it.
+    //   3. TVmaze's own rating.average (already on the result) as a last resort.
+    if (malRating) {
+      result.rating = malRating;
+    } else if (anilist?.rating) {
+      // AniList matched the title as anime and carries a score; prefer it over TVmaze's general
+      // rating even when the air dates themselves came from TVmaze.
+      result.rating = anilist.rating;
+      failed = Boolean(anilist?.failed);
+    } else if (anilist === null) {
+      // AniList responded and the title is not anime (and MAL did not match it either), so drop
+      // TVmaze's general rating and stay anime-only (Plex already shows IMDb/TMDB for non-anime).
+      result.rating = null;
+    } else {
+      // The title is anime (MAL and/or AniList matched it) but no source had a score, or every
+      // score source was rate limited; keep the TVmaze rating already on the result as a last
+      // resort, and remember a rate limit so the lookup is retried soon rather than cached for
+      // hours.
+      failed = failed || Boolean(anilist?.failed);
+    }
+
+    // Per-episode score: MAL's poll score preferred, from whichever path resolved it.
+    const episodeRating = malEpisodeRating || anilist?.episodeRating || result.episodeRating || null;
+    if (episodeRating) {
+      result.episodeRating = episodeRating;
     }
 
     // Cache a lookup whose score sources all hit a rate limit only briefly, so a transient failure
