@@ -1,6 +1,6 @@
 # PlexAirDate
 
-Firefox Manifest V3 extension that adds the next airing episode date to Plex
+Firefox and Chrome Manifest V3 extension that adds the next airing episode date to Plex
 show and episode detail pages when the show is still airing.
 
 The content script reads Plex's stable `data-testid` metadata fields, searches
