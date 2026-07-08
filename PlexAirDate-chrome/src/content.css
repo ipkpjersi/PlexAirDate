@@ -34,6 +34,45 @@
   color: rgba(255, 255, 255, 0.42);
 }
 
+/* Anime score line: MAL logo + score, always white so it reads as its own line. */
+.plex-air-date-rating {
+  align-items: center;
+  color: #fff;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.plex-air-date-rating-icon {
+  /* Inlined MyAnimeList logo (from image.myanimelist.net) so the extension stays
+     self-contained. The logo is square; sizing by height keeps it undistorted. */
+  background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgBAMAAACBVGfHAAAAMFBMVEX////7/P3j6PO4xOB0i8FEY6wxVKMvUqIvUaIuUaItUaItUKIrTqEoTJ8jR50YP5hvc84AAAAA4ElEQVR42mOYiQYYBkpgWvrM6ekzZ05PywRRQIG1b6pr3s6cVvvude3bSqDA7NTQa1dDK/OuhrgddT0OFKgJZMpNYsp+YsjA8pn5GUggiMHegCnPgcnYBC7AzMA0lcE/SAUmAOQzXWGKcYBrYTEwYbrMKCgIEqgEC1y+wnSZSUkRKPD7JFjg7ROglvcBQIHUcJC1LM+eMJUKxgHNYBDU6WSoSVJ59kQpz8DeSeWzkpJdJsQvaXlOMWXp09PKdgL9MnvnzJm7Z2c+n71z9u7dYO93gtDOTKBPO2cMYKgTEgAAMM4O20BRNMEAAAAASUVORK5CYII=");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  height: 18px;
+  width: 18px;
+}
+
+.plex-air-date-rating-name {
+  color: #fff;
+  font-weight: 700;
+}
+
+.plex-air-date-rating-tag {
+  color: #fff;
+  font-size: 0.72em;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  opacity: 0.75;
+}
+
+.plex-air-date-rating-score {
+  color: #fff;
+  font-weight: 600;
+}
+
 @media (prefers-color-scheme: light) {
   .plex-air-date-row {
     color: rgba(0, 0, 0, 0.7);

@@ -2,9 +2,14 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
-## 0.4.1
+## 0.4.3
 
-- Added the MyAnimeList (MAL) score for anime on show, season, and episode pages. Since Plex already shows IMDb and TMDB scores but never a MAL score, the MAL score is shown right beside Plex's own IMDb and TMDB badges. On pages where Plex has no ratings badges to sit beside, the MAL score is shown on its own line instead. When MAL has no score for a title, the AniList score is shown in its place and labelled as such.
+- Anime episode pages now also show the MyAnimeList per-episode score, taken from MAL's episode polls and converted to a score out of 10, tagged "EP" so it is not confused with the overall series score. It only appears when MAL has votes for that episode, and for now only on first-season episodes, where the episode numbers line up with MAL.
+- Fixed the MAL score and the episode air dates not showing on show pages after a recent Plex layout change.
+
+## 0.4.2
+
+- Added the MyAnimeList (MAL) score for anime on show, season, and episode pages, shown on its own line below the episode air dates as the MAL logo followed by the score. Plex already shows IMDb and TMDB scores but never a MAL score, so this fills that gap. When MAL has no score for a title, the AniList score is shown in its place and labelled as such.
 
 ## 0.3.1
 

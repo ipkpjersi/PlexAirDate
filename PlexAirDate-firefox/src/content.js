@@ -1,15 +1,10 @@
 (() => {
   const ROW_ID = "plex-air-date-row";
-  // The MAL score is shown as a badge beside Plex's own IMDb/TMDB badges when they exist;
-  // ROW_RATING_ID is the fallback pill in our own row for pages without a ratings block.
-  const MAL_BADGE_ID = "plex-air-date-mal";
-  const ROW_RATING_ID = "plex-air-date-row-rating";
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const cache = new Map();
 
   let pendingRender = 0;
   let lastPageKey = "";
-  let lastRating = null;
 
   const monthDayYearFormatter = new Intl.DateTimeFormat(undefined, {
     day: "numeric",
@@ -77,13 +72,13 @@
     const line1Node = document.querySelector('[data-testid="metadata-line1"]');
     const line2Node = document.querySelector('[data-testid="metadata-line2"]');
 
-    // Episode and show pages expose line1/line2 metadata; the anchor is line2.
-    if (line1Node && line2Node) {
+    if (line1Node) {
       const line1 = line1Node.textContent || "";
       const seasonMatch = line1.match(/Season\s+(\d+)/iu);
       const episodeMatch = line1.match(/Episode\s+(\d+)/iu);
 
-      if (seasonMatch && episodeMatch) {
+      // Episode pages put "Season X ... Episode Y" in line1 and expose line2 as the anchor.
+      if (seasonMatch && episodeMatch && line2Node) {
         return {
           title,
           type: "episode",
@@ -94,13 +89,18 @@
         };
       }
 
-      if (isShowTitlePage(line1)) {
+      // Show pages no longer have a line2, and line1 now holds the content rating, year, and
+      // genres rather than a lone year. Detect them by their Seasons/Episodes hub or a TV-show
+      // genre link, and append our row below the whole metadata block (there is no line2 to
+      // anchor after).
+      if (!seasonMatch && isShowTitlePage(line1Node)) {
         return {
           title,
           type: "show",
           season: null,
           episode: null,
-          anchorNode: line2Node,
+          anchorNode: line1Node,
+          appendParent: titleNode.closest("div")?.parentElement || null,
           pageKey: `${title}|show|${location.href}`
         };
       }
@@ -125,13 +125,18 @@
     return null;
   }
 
-  function isShowTitlePage(line1) {
-    const hasShowYear = /^\s*(?:19|20)\d{2}\s*$/u.test(line1 || "");
+  function isShowTitlePage(line1Node) {
+    // A Seasons/Episodes hub, or a genre link carrying the library type "2" (a TV show; movies
+    // are type 1), marks a show page. Both distinguish a show from a movie, which a bare year
+    // in line1 cannot.
     const hasSeasonsHub = Array.from(document.querySelectorAll('[data-testid="hubTitle"]')).some(
-      (node) => (node.textContent || "").trim() === "Seasons"
+      (node) => /^(?:Seasons|Episodes)$/u.test((node.textContent || "").trim())
+    );
+    const hasShowTypeLink = Boolean(
+      line1Node?.querySelector('a[href*="type%3D2"], a[href*="type=2"]')
     );
 
-    return hasShowYear || hasSeasonsHub;
+    return hasSeasonsHub || hasShowTypeLink;
   }
 
   function getInsertionParent(anchorNode) {
@@ -144,7 +149,7 @@
 
   function ensureRow(context) {
     const parent = getInsertionParent(context.anchorNode);
-    if (!parent) {
+    if (!parent && !context.appendParent) {
       return null;
     }
 
@@ -156,7 +161,10 @@
       row.dataset.state = "loading";
 
       const anchorWrapper = context.anchorNode.closest("div");
-      if (anchorWrapper) {
+      if (context.appendParent) {
+        // Show pages have no line2 to anchor after, so append below the metadata block.
+        context.appendParent.append(row);
+      } else if (anchorWrapper) {
         anchorWrapper.insertAdjacentElement("afterend", row);
       } else {
         parent.append(row);
@@ -166,7 +174,7 @@
     return row;
   }
 
-  function setRow(row, data, showRating) {
+  function setRow(row, data) {
     const source = data.source ? ` ${data.source}` : "";
     row.dataset.state = "ready";
     row.innerHTML = "";
@@ -181,14 +189,6 @@
       yearNode.textContent = yearText;
       row.append(yearNode);
       titleParts.push(yearText);
-    }
-
-    if (showRating && data.rating) {
-      // Fallback for pages with no Plex ratings block to sit beside: show the anime score
-      // (MAL, or AniList as a fallback) on our own line instead.
-      const text = formatRating(data.rating);
-      row.append(buildRatingPill(data.rating));
-      titleParts.push(`Rating: ${text} ${data.rating.source}`);
     }
 
     if (data.current) {
@@ -207,6 +207,20 @@
       const text = formatEpisode(data.next, "airs");
       row.append(buildPill("Next episode", text, source));
       titleParts.push(`Next episode: ${text}`);
+    }
+
+    if (data.rating) {
+      // Anime score (MAL, or AniList as a fallback), shown below the airing info. Plex
+      // already displays IMDb/TMDB scores elsewhere, so we only add a rating for anime.
+      row.append(buildRatingLine(data.rating));
+      titleParts.push(`${data.rating.source}: ${formatRating(data.rating)}`);
+    }
+
+    if (data.episodeRating) {
+      // MAL per-episode poll score (converted to /10), tagged "EP" to set it apart from the
+      // series score above.
+      row.append(buildRatingLine(data.episodeRating, "EP"));
+      titleParts.push(`${data.episodeRating.source} episode: ${formatRating(data.episodeRating)}`);
     }
 
     row.title = `${titleParts.join(" | ")}${source}`;
@@ -232,6 +246,41 @@
     return pill;
   }
 
+  function buildRatingLine(rating, tag) {
+    // The anime score line: the MAL logo (or the source name for the AniList fallback)
+    // followed by the score, all in white so it reads as its own distinct line. An optional
+    // tag (e.g. "EP") distinguishes the per-episode score from the series score.
+    const line = document.createElement("span");
+    line.className = "plex-air-date-rating";
+    line.title = `${rating.source}${tag ? " episode" : ""} score ${formatRating(rating)}`;
+
+    if (rating.source === "MAL") {
+      const icon = document.createElement("span");
+      icon.className = "plex-air-date-rating-icon";
+      icon.setAttribute("aria-hidden", "true");
+      line.append(icon);
+    } else {
+      const name = document.createElement("span");
+      name.className = "plex-air-date-rating-name";
+      name.textContent = rating.source;
+      line.append(name);
+    }
+
+    if (tag) {
+      const tagNode = document.createElement("span");
+      tagNode.className = "plex-air-date-rating-tag";
+      tagNode.textContent = tag;
+      line.append(tagNode);
+    }
+
+    const score = document.createElement("span");
+    score.className = "plex-air-date-rating-score";
+    score.textContent = formatScore(rating);
+    line.append(score);
+
+    return line;
+  }
+
   function airVerb(date) {
     return date > new Date() ? "airs" : "aired";
   }
@@ -254,90 +303,6 @@
 
   function formatRating(rating) {
     return `${formatScore(rating)} / ${rating.max}`;
-  }
-
-  // Plex renders its IMDb/TMDB scores as spans titled "<name> Rating ..." inside the
-  // metadata-ratings block. Find that flex row so we can drop a matching MAL badge into it.
-  function findRatingsSlot() {
-    const ratingsNode = document.querySelector('[data-testid="metadata-ratings"]');
-    if (!ratingsNode) {
-      return null;
-    }
-
-    const template = ratingsNode.querySelector('span[title*="Rating"]');
-    if (!template || !template.parentElement) {
-      return null;
-    }
-
-    return { container: template.parentElement, template };
-  }
-
-  function buildMalBadge(rating, template) {
-    // Reuse Plex's own class names (read from an existing IMDb/TMDB badge) so the MAL badge
-    // inherits their typography and spacing and sits beside them looking native.
-    const text = formatScore(rating);
-    const badge = document.createElement("span");
-    badge.id = MAL_BADGE_ID;
-    badge.className = template.className;
-    badge.title = `${rating.source} score ${text}`;
-
-    const number = document.createElement("span");
-    const numberTemplate = template.querySelector("span");
-    number.className = numberTemplate ? numberTemplate.className : "";
-    number.textContent = `${rating.source} ${text}`;
-
-    badge.append(number);
-    return badge;
-  }
-
-  function removeMalBadge() {
-    document.getElementById(MAL_BADGE_ID)?.remove();
-  }
-
-  // Place the MAL score beside Plex's IMDb/TMDB badges. Returns true when it was placed
-  // there, false when there is no ratings block to place it in (caller then uses our row).
-  function placeMalBadge(rating) {
-    removeMalBadge();
-    if (!rating) {
-      return false;
-    }
-
-    const slot = findRatingsSlot();
-    if (!slot) {
-      return false;
-    }
-
-    slot.container.append(buildMalBadge(rating, slot.template));
-    return true;
-  }
-
-  // Keep the badge in sync when Plex re-renders its ratings row (which can drop our badge or
-  // reveal the block late): (re)insert it when there is a slot, otherwise show it in our row.
-  function reconcileRating(row) {
-    if (!lastRating) {
-      return;
-    }
-
-    const slot = findRatingsSlot();
-    const rowPill = document.getElementById(ROW_RATING_ID);
-
-    if (slot) {
-      if (!document.getElementById(MAL_BADGE_ID)) {
-        slot.container.append(buildMalBadge(lastRating, slot.template));
-      }
-      rowPill?.remove();
-    } else {
-      removeMalBadge();
-      if (!rowPill && row) {
-        row.append(buildRatingPill(lastRating));
-      }
-    }
-  }
-
-  function buildRatingPill(rating) {
-    const pill = buildPill("Rating", formatRating(rating), ` ${rating.source}`);
-    pill.id = ROW_RATING_ID;
-    return pill;
   }
 
   function formatAirDate(date) {
@@ -393,6 +358,9 @@
       // An AniList match means the title is anime, so prefer its MAL score for the rating
       // even when the air dates themselves came from TVmaze.
       result.rating = anilist.rating;
+    }
+    if (result && anilist?.episodeRating) {
+      result.episodeRating = anilist.episodeRating;
     }
 
     setCached(cacheKey, result);
@@ -593,13 +561,22 @@
       rating = { score: media.averageScore / 10, max: 10, source: "AniList" };
     }
 
-    if (!nextEpisode && !latestEpisode && !currentEpisode && !rating) {
+    // The MAL per-episode poll score, only on season-1 episode pages: we match the anime by
+    // show title (one MAL entry), and Plex's episode number lines up with that entry only for
+    // season 1. For later seasons Plex points at a different MAL entry, so we skip it.
+    let episodeRating = null;
+    if (media?.idMal && context.type === "episode" && context.season === 1 && context.episode) {
+      episodeRating = await fetchMalEpisodeScore(media.idMal, context.episode).catch(() => null);
+    }
+
+    if (!nextEpisode && !latestEpisode && !currentEpisode && !rating && !episodeRating) {
       return null;
     }
 
     return {
       source: "AniList",
       rating,
+      episodeRating,
       current: currentEpisode,
       latest: latestEpisode,
       next: nextEpisode,
@@ -618,7 +595,30 @@
 
     const payload = await response.json();
     const score = payload?.data?.score;
-    return typeof score === "number" ? { score, max: 10, source: "MAL" } : null;
+    // Jikan returns 0 (not null) for an anime with no score yet, so treat 0 as "no score"
+    // and let the caller fall back to the AniList average.
+    return typeof score === "number" && score > 0 ? { score, max: 10, source: "MAL" } : null;
+  }
+
+  async function fetchMalEpisodeScore(idMal, episode) {
+    // Per-episode poll scores only exist in the episodes LIST endpoint (100 per page) as a
+    // nullable 1.00-5.00 average, so fetch the page the episode falls on and match by number.
+    const page = Math.floor((episode - 1) / 100) + 1;
+    const params = new URLSearchParams({ page: String(page) });
+    const response = await fetch(`https://api.jikan.moe/v4/anime/${idMal}/episodes?${params.toString()}`, {
+      credentials: "omit"
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const list = Array.isArray(payload?.data) ? payload.data : [];
+    const score = list.find((item) => item?.mal_id === episode)?.score;
+    // Convert the 1-5 poll average to a /10 score (score / 5 * 10); null/0 means no votes.
+    return typeof score === "number" && score > 0
+      ? { score: (score / 5) * 10, max: 10, source: "MAL", perEpisode: true }
+      : null;
   }
 
   async function fetchAniListEpisode(mediaId, episodeNumber) {
@@ -732,32 +732,23 @@
     );
   }
 
-  function clearOutput() {
-    removeRow();
-    removeMalBadge();
-    lastRating = null;
-  }
-
   async function render() {
     pendingRender = 0;
 
     if (!isLikelyPlexPage()) {
-      clearOutput();
+      removeRow();
       lastPageKey = "";
       return;
     }
 
     const context = getMetadataContext();
     if (!context) {
-      clearOutput();
+      removeRow();
       lastPageKey = "";
       return;
     }
 
     if (context.pageKey === lastPageKey && document.getElementById(ROW_ID)) {
-      // Same page and our row is still there: only reconcile the MAL badge, since Plex may
-      // have re-rendered its ratings row underneath us.
-      reconcileRating(document.getElementById(ROW_ID));
       return;
     }
 
@@ -769,7 +760,7 @@
 
     const airInfo = await fetchAirInfo(context);
     if (!airInfo) {
-      clearOutput();
+      removeRow();
       return;
     }
 
@@ -778,11 +769,7 @@
       return;
     }
 
-    lastRating = airInfo.rating || null;
-    // Prefer placing the MAL score beside Plex's IMDb/TMDB badges; only fall back to our own
-    // row line when this page has no ratings block to place it in.
-    const placedBeside = placeMalBadge(airInfo.rating);
-    setRow(row, airInfo, Boolean(airInfo.rating) && !placedBeside);
+    setRow(row, airInfo);
   }
 
   function scheduleRender() {
