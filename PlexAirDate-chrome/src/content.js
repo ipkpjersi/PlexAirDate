@@ -406,7 +406,9 @@
     // missed, and it still detects anime and carries an averageScore.
     let anilist = null;
     if (!malRating || !tvmaze) {
-      anilist = await fetchFromAniList(context).catch(() => ({ failed: true }));
+      // If MAL already hit a Jikan rate limit, tell AniList to skip its own Jikan sub-calls: they
+      // would only fail again and deepen the penalty, so AniList uses its own averageScore instead.
+      anilist = await fetchFromAniList(context, { skipJikan: Boolean(mal?.failed) }).catch(() => ({ failed: true }));
     }
     // AniList may return only a { failed: true } marker (a rate-limited search that produced no
     // data); treat that as "no AniList result" when merging for the air dates.
@@ -607,7 +609,7 @@
     };
   }
 
-  async function fetchFromAniList(context) {
+  async function fetchFromAniList(context, { skipJikan = false } = {}) {
     const query = `
       query PlexAirDate($search: String) {
         Media(search: $search, type: ANIME) {
@@ -694,18 +696,22 @@
     }
 
     // Prefer the real MAL score (via Jikan) for the resolved season; fall back to AniList's own
-    // averageScore for that same season.
+    // averageScore for that same season. When the MAL-direct path already hit a Jikan rate limit
+    // (skipJikan), do not re-query Jikan here - it would only fail again and deepen the penalty;
+    // use AniList's own averageScore directly.
     let rating = null;
-    if (seasonMedia?.idMal) {
+    if (!skipJikan && seasonMedia?.idMal) {
       rating = await guard(fetchMalScore(seasonMedia.idMal));
     }
     if (!rating && typeof seasonMedia?.averageScore === "number") {
       rating = { score: seasonMedia.averageScore / 10, max: 10, source: "AniList" };
     }
 
-    // MAL per-episode poll score, on episode pages, from the resolved season entry.
+    // MAL per-episode poll score, on episode pages, from the resolved season entry. Skipped when
+    // Jikan is already rate-limited (skipJikan): the per-episode score is MAL-only, so it is simply
+    // unavailable until Jikan recovers rather than worth a doomed request.
     let episodeRating = null;
-    if (context.type === "episode" && context.episode && seasonMedia?.idMal) {
+    if (!skipJikan && context.type === "episode" && context.episode && seasonMedia?.idMal) {
       // Skip if the episode number does not fit the resolved entry (a sign the season chain
       // did not line up), so we do not show a mismatched score.
       const fitsEntry = !seasonMedia?.episodes || context.episode <= seasonMedia.episodes;
