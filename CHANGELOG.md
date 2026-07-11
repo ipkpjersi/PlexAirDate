@@ -2,12 +2,16 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.8.1
+
+- Added detailed diagnostic logging to the browser console (each line prefixed with "[PlexAirDate]") that traces exactly what the extension does on each page: which sources it queries, the status of every MyAnimeList and AniList request and any retries, cache and stored-id hits, and the final score it shows. This is a troubleshooting aid only and does not change what the extension displays; it can be turned off by setting DEBUG to false in the code.
+
 ## 0.8.0
 
 - Scores now recover far more reliably when MyAnimeList or AniList is briefly rate-limited. Previously the extension retried the same rate-limited service with a short delay that was never long enough to outlast the limit, then gave up and left the score blank. It now falls back immediately: if MyAnimeList is rate-limited it uses AniList's own score, and if that is unavailable too it uses the TVmaze rating, so a score appears in most cases instead of a blank note.
 - Greatly reduced the number of requests made while browsing quickly through a season, which is what triggered the rate limit in the first place. The MyAnimeList title match and per-episode score pages are now reused instead of refetched on every page, and the matched MyAnimeList entry for each show and season is remembered across sessions (a MyAnimeList id never changes), so revisiting a show later skips the lookup entirely. This uses a small amount of local extension storage (the new "storage" permission).
 - When MyAnimeList is rate-limited, the extension no longer makes extra MyAnimeList requests through the AniList fallback that were guaranteed to fail and only made the rate limit worse.
-- Brief MyAnimeList gateway errors (504) are no longer mistaken for a rate limit.
+- Brief MyAnimeList gateway errors (the 504s it returns intermittently, which are not rate limits) are now retried briefly so they recover and keep showing the MyAnimeList score, while a genuine rate limit (429) still falls back immediately instead of retrying pointlessly.
 - The orange note shown when no score is available no longer promises a retry that did not happen; it now simply states the score is temporarily unavailable.
 
 ## 0.7.0
