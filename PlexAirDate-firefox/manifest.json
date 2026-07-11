@@ -14,7 +14,9 @@
           }
     }
   },
-  "permissions": [],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://api.tvmaze.com/*",
     "https://graphql.anilist.co/*",

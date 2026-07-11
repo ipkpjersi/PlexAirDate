@@ -13,6 +13,12 @@
   const malFullCache = new Map();
   // Resolved MAL "base entry + season N -> season entry" lookups for that same walk.
   const malSeasonEntryCache = new Map();
+  // MAL "title -> base entry" search results, so navigating multiple episodes/seasons of one show
+  // does not re-run the Jikan title search each time. null = searched but no anime match.
+  const malTitleCache = new Map();
+  // MAL episodes-list pages (100 episode scores each) keyed by `malId|page`, so every episode that
+  // falls on the same page reuses one Jikan call instead of re-fetching the page per episode.
+  const malEpisodesPageCache = new Map();
 
   let pendingRender = 0;
   let lastPageKey = "";
@@ -441,24 +447,24 @@
       result.rating = null;
       if (mal?.failed) {
         // MAL was rate-limited, so its verdict is missing and AniList's "not anime" is unconfirmed;
-        // flag it for a quick retry and say why the score is blank rather than showing nothing.
+        // cache briefly (so revisiting refreshes it) and say why the score is blank, not nothing.
         failed = true;
-        ratingNote = { level: "warn", message: "MAL rate-limited, retrying soon." };
+        ratingNote = { level: "warn", message: "MAL rate-limited; score unavailable right now." };
       } else {
         ratingNote = { level: "info", message: "No score: title not matched on MAL or AniList." };
       }
     } else {
       // The title is anime (MAL and/or AniList matched it) but no source had a score, or every
       // score source was rate limited; keep the TVmaze rating already on the result as a last
-      // resort, and remember a rate limit so the lookup is retried soon rather than cached for
-      // hours.
+      // resort, and remember a rate limit so the lookup is cached only briefly (and refreshes on a
+      // revisit) rather than for hours.
       failed = failed || Boolean(anilist?.failed);
       if (!result.rating) {
-        // Still nothing to show. Distinguish a transient rate limit (worth retrying) from a genuine
-        // absence of any MAL/AniList/TVmaze score, so the orange warning names the actual cause.
+        // Still nothing to show. Distinguish a transient rate limit from a genuine absence of any
+        // MAL/AniList/TVmaze score, so the orange warning names the actual cause.
         const rateLimited = Boolean(mal?.failed) || Boolean(anilist?.failed);
         ratingNote = rateLimited
-          ? { level: "warn", message: "MAL/AniList rate-limited, retrying soon." }
+          ? { level: "warn", message: "MAL/AniList rate-limited; score unavailable right now." }
           : { level: "warn", message: "No MAL, AniList, or TVmaze rating found." };
       }
     }
@@ -726,14 +732,15 @@
 
   // Jikan (the unofficial MyAnimeList API) rate-limits aggressively (about 3 requests/second
   // and 60/minute) and intermittently returns 429/5xx. Serialize its requests behind a shared
-  // queue spaced at least JIKAN_MIN_GAP_MS apart so back-to-back calls do not trip the limit,
-  // and retry transient failures so a single hiccup does not silently demote a real MAL score
-  // to the AniList fallback. The 3/second limit is a ~333ms floor, so 350ms keeps us just under
-  // it while adding as little first-render latency as possible; the retry/backoff covers the
-  // occasional 429 that still slips through.
+  // queue spaced at least JIKAN_MIN_GAP_MS apart so back-to-back calls do not trip the per-second
+  // limit. The 3/second limit is a ~333ms floor, so 350ms keeps us just under it while adding as
+  // little first-render latency as possible. There is no retry: a 429/5xx cannot be outlasted
+  // within a render (the reset window is ~60s), so a transient failure returns immediately and the
+  // caller falls back to another score source (AniList's averageScore, then TVmaze) instead.
   const JIKAN_MIN_GAP_MS = 350;
-  const JIKAN_MAX_ATTEMPTS = 3;
-  const JIKAN_RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+  // Statuses that mean "transient" (a rate limit or gateway error) rather than a genuine miss (404):
+  // the caller treats these as a soft failure worth a fallback, not a definitive "not anime".
+  const JIKAN_TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
   let jikanQueue = Promise.resolve();
   let jikanLastRequestAt = 0;
 
@@ -742,43 +749,19 @@
   }
 
   function fetchJikan(url) {
-    // Chain onto the previous call so only one Jikan request is in flight at a time.
+    // Chain onto the previous call so only one Jikan request is in flight at a time, spaced at
+    // least JIKAN_MIN_GAP_MS apart. No retry: the response (including a 429/5xx) is returned as-is
+    // for the caller to fall back on.
     const run = jikanQueue.then(async () => {
-      for (let attempt = 1; attempt <= JIKAN_MAX_ATTEMPTS; attempt++) {
-        const wait = jikanLastRequestAt + JIKAN_MIN_GAP_MS - Date.now();
-        if (wait > 0) {
-          await sleep(wait);
-        }
-
-        let response;
-        try {
-          response = await fetch(url, { credentials: "omit" });
-        } catch (error) {
-          // Network error: retry with a growing backoff unless this was the last attempt.
-          jikanLastRequestAt = Date.now();
-          if (attempt === JIKAN_MAX_ATTEMPTS) {
-            throw error;
-          }
-          await sleep(JIKAN_MIN_GAP_MS * attempt);
-          continue;
-        }
-        jikanLastRequestAt = Date.now();
-
-        // Retry rate-limit and transient server errors; return anything else as-is (e.g. a
-        // 404, or a success) for the caller to handle.
-        if (response.ok || !JIKAN_RETRY_STATUSES.has(response.status) || attempt === JIKAN_MAX_ATTEMPTS) {
-          return response;
-        }
-
-        // Honour a Retry-After header when present, otherwise back off by the attempt count.
-        const retryAfter = Number.parseFloat(response.headers.get("Retry-After") || "");
-        const backoff =
-          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : JIKAN_MIN_GAP_MS * attempt;
-        await sleep(backoff);
+      const wait = jikanLastRequestAt + JIKAN_MIN_GAP_MS - Date.now();
+      if (wait > 0) {
+        await sleep(wait);
       }
-
-      // The loop always returns or throws above; this satisfies the return-a-Response contract.
-      return fetch(url, { credentials: "omit" });
+      try {
+        return await fetch(url, { credentials: "omit" });
+      } finally {
+        jikanLastRequestAt = Date.now();
+      }
     });
 
     // Keep the queue chain alive even if this request rejects, so later calls still run.
@@ -820,8 +803,9 @@
     const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${malId}/full`);
     if (!response.ok) {
       // A rate-limit/server error is transient: throw so the walk aborts without caching a wrong
-      // result, and retries on a later view. A genuine miss (e.g. 404) is cached as "no entry".
-      if (JIKAN_RETRY_STATUSES.has(response.status)) {
+      // result, letting the caller fall back to another score source. A genuine miss (e.g. 404) is
+      // cached as "no entry".
+      if (JIKAN_TRANSIENT_STATUSES.has(response.status)) {
         throw new Error(`Jikan full failed with status ${response.status}`);
       }
       malFullCache.set(malId, null);
@@ -914,55 +898,151 @@
     return result;
   }
 
+  // Persistent (cross-session) cache of the stable "title + season -> MAL id" resolution. A MAL id
+  // never changes, so persisting it lets later sessions skip the Jikan title search AND the
+  // multi-call season relation walk. Only the id is stored - the score and episode count are NOT
+  // (they change over time), so they are fetched fresh via fetchMalFull on each hit.
+  const extStorage =
+    (typeof browser !== "undefined" ? browser : typeof chrome !== "undefined" ? chrome : null)?.storage?.local ||
+    null;
+  const MAL_ID_KEY_PREFIX = "malId:";
+  // A MAL id never changes, so this cache could be permanent; the TTL exists only as a self-heal so
+  // a rare mis-resolved season walk re-resolves eventually rather than staying wrong forever. New
+  // seasons need no TTL: each season is its own key, so a newly released season is simply a fresh
+  // lookup and the already-stored seasons stay valid. Tune MAL_ID_CACHE_DAYS to trade re-walk
+  // frequency (lower = fresher / self-heals sooner, higher = fewer Jikan calls).
+  const MAL_ID_CACHE_DAYS = 1;
+  const MAL_ID_TTL_MS = MAL_ID_CACHE_DAYS * 24 * 60 * 60 * 1000;
+
+  function malIdStoreKey(title, season) {
+    return `${MAL_ID_KEY_PREFIX}${canonicalTitle(title)}|${season}`;
+  }
+
+  async function loadStoredMalId(title, season) {
+    if (!extStorage) {
+      return undefined;
+    }
+    const key = malIdStoreKey(title, season);
+    try {
+      const stored = await extStorage.get(key);
+      const value = stored?.[key];
+      if (!value || typeof value.id !== "number" || Date.now() - value.ts > MAL_ID_TTL_MS) {
+        return undefined;
+      }
+      return value.id;
+    } catch (error) {
+      return undefined;
+    }
+  }
+
+  function storeMalId(title, season, malId) {
+    if (!extStorage || typeof malId !== "number") {
+      return;
+    }
+    const key = malIdStoreKey(title, season);
+    // Fire and forget; a storage failure just means the next session re-resolves the id.
+    Promise.resolve(extStorage.set({ [key]: { id: malId, ts: Date.now() } })).catch(() => {});
+  }
+
+  async function searchMalBaseEntry(title) {
+    // The Jikan title search that anchors the MAL-by-title path, cached by canonical title so
+    // every episode/season page of the same show reuses one search. Returns the base entry
+    // { malId, episodes, score }, or null for a genuine miss (searched, no anime match). Throws on
+    // a transient failure (rate limit / gateway / network) so it is not cached and the caller can
+    // fall back; only definite outcomes (a hit or a real miss) are cached.
+    const key = canonicalTitle(title);
+    if (malTitleCache.has(key)) {
+      return malTitleCache.get(key);
+    }
+
+    const params = new URLSearchParams({ q: title, limit: "8" });
+    const response = await fetchJikan(`https://api.jikan.moe/v4/anime?${params.toString()}`);
+    if (!response.ok) {
+      // A rate-limit/server error (429/5xx) is transient; a plain miss (e.g. 404) is a real miss.
+      if (JIKAN_TRANSIENT_STATUSES.has(response.status)) {
+        throw new Error(`Jikan search failed with status ${response.status}`);
+      }
+      malTitleCache.set(key, null);
+      return null;
+    }
+
+    const payload = await response.json();
+    const list = Array.isArray(payload?.data) ? payload.data : [];
+    const match = list.find((item) => {
+      const names = [
+        item?.title,
+        item?.title_english,
+        item?.title_japanese,
+        ...(item?.titles || []).map((entry) => entry?.title)
+      ].filter(Boolean);
+      return names.some((name) => isProbableTitleMatch(title, name));
+    });
+    if (!match?.mal_id) {
+      malTitleCache.set(key, null);
+      return null;
+    }
+
+    const entry = {
+      malId: match.mal_id,
+      episodes: typeof match.episodes === "number" ? match.episodes : null,
+      score: typeof match.score === "number" && match.score > 0 ? match.score : null
+    };
+    malTitleCache.set(key, entry);
+    return entry;
+  }
+
   async function fetchMalByTitle(context) {
     // A direct MAL lookup by title via Jikan, independent of AniList. AniList normally supplies the
     // MAL id (and the score routes through it), so an AniList rate limit takes out the MAL score
     // too; this path restores a real MAL score without touching AniList. Jikan lists only anime, so
     // a confident title match also confirms the title is anime. Later seasons are resolved through
     // MAL's own relation graph (resolveMalSeason), so this works on every season, not just the first.
-    const params = new URLSearchParams({ q: context.title, limit: "8" });
-    let response;
+    // The searched entry is the base (right for show pages and season 1); season/episode pages past
+    // season 1 need the per-season entry, so walkSeason is the season whose id we resolve and store.
+    const walkSeason =
+      context.season && context.season > 1 && (context.type === "episode" || context.type === "season")
+        ? context.season
+        : 1;
+
+    // Fast path: a previously resolved MAL id for this title+season, persisted across sessions. The
+    // id is stable, so we skip the search and the season walk and only fetch the current score via
+    // fetchMalFull (session-cached, and it also warms the relation graph for later seasons).
+    const storedMalId = await loadStoredMalId(context.title, walkSeason);
+    if (typeof storedMalId === "number") {
+      let node;
+      try {
+        node = await fetchMalFull(storedMalId);
+      } catch (error) {
+        // Transient Jikan failure fetching the score: fall back rather than re-resolving.
+        return { failed: true };
+      }
+      if (node) {
+        return buildMalRating(context, { malId: storedMalId, episodes: node.episodes, score: node.score });
+      }
+      // The stored id no longer resolves (rare); fall through to a full re-resolution below.
+    }
+
+    let entry;
     try {
-      response = await fetchJikan(`https://api.jikan.moe/v4/anime?${params.toString()}`);
+      entry = await searchMalBaseEntry(context.title);
     } catch (error) {
-      // A network error after retries: signal a transient failure so the caller caches briefly.
+      // A transient search failure (rate limit / gateway / network): signal it so the caller caches
+      // briefly and falls back to another score source.
       return { failed: true };
     }
-    if (!response.ok) {
-      // A rate-limit/server error (429/5xx) is transient; a plain miss (e.g. 404) is not.
-      return JIKAN_RETRY_STATUSES.has(response.status) ? { failed: true } : null;
-    }
-
-    const payload = await response.json();
-    const list = Array.isArray(payload?.data) ? payload.data : [];
-    const match = list.find((item) => {
-      const titles = [
-        item?.title,
-        item?.title_english,
-        item?.title_japanese,
-        ...(item?.titles || []).map((entry) => entry?.title)
-      ].filter(Boolean);
-      return titles.some((title) => isProbableTitleMatch(context.title, title));
-    });
-    if (!match?.mal_id) {
+    if (!entry) {
       return null;
     }
+    // Persist the base (show / season 1) id as soon as we have it.
+    storeMalId(context.title, 1, entry.malId);
 
-    // Resolve the MAL entry for the Plex season being viewed. The searched match is the base entry
-    // (right for show pages and season 1); season/episode pages past season 1 walk MAL's relation
-    // graph to the correct per-season entry, matching what the AniList path does.
-    let entry = {
-      malId: match.mal_id,
-      episodes: typeof match.episodes === "number" ? match.episodes : null,
-      score: typeof match.score === "number" && match.score > 0 ? match.score : null
-    };
-    if (context.season && context.season > 1 && (context.type === "episode" || context.type === "season")) {
+    if (walkSeason > 1) {
       let resolved;
       try {
-        resolved = await resolveMalSeason(match.mal_id, context.season);
+        resolved = await resolveMalSeason(entry.malId, walkSeason);
       } catch (error) {
         // The relation walk hit a rate limit: signal a transient failure so the caller caches
-        // briefly and retries, rather than showing (or caching) a mismatched base-season score.
+        // briefly and falls back, rather than showing (or caching) a mismatched base-season score.
         return { failed: true };
       }
       if (!resolved) {
@@ -970,8 +1050,14 @@
         return null;
       }
       entry = resolved;
+      storeMalId(context.title, walkSeason, entry.malId);
     }
 
+    return buildMalRating(context, entry);
+  }
+
+  async function buildMalRating(context, entry) {
+    // Turn a resolved MAL entry { malId, episodes, score } into the series and per-episode ratings.
     let rating = entry.score ? { score: entry.score, max: 10, source: "MAL" } : null;
     if (!rating && entry.malId) {
       // The resolved entry carried no inline score (rare); ask MAL directly before giving up.
@@ -996,16 +1082,23 @@
 
   async function fetchMalEpisodeScore(idMal, episode) {
     // Per-episode poll scores only exist in the episodes LIST endpoint (100 per page) as a
-    // nullable 1.00-5.00 average, so fetch the page the episode falls on and match by number.
+    // nullable 1.00-5.00 average, so fetch the page the episode falls on and match by number. The
+    // page is cached (malEpisodesPageCache) so all 100 episodes on it share one Jikan call.
     const page = Math.floor((episode - 1) / 100) + 1;
-    const params = new URLSearchParams({ page: String(page) });
-    const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${idMal}/episodes?${params.toString()}`);
-    if (!response.ok) {
-      return null;
+    const cacheKey = `${idMal}|${page}`;
+    let list = malEpisodesPageCache.get(cacheKey);
+    if (!list) {
+      const params = new URLSearchParams({ page: String(page) });
+      const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${idMal}/episodes?${params.toString()}`);
+      if (!response.ok) {
+        // Transient or a miss: return null uncached so a later view can try again.
+        return null;
+      }
+      const payload = await response.json();
+      list = Array.isArray(payload?.data) ? payload.data : [];
+      malEpisodesPageCache.set(cacheKey, list);
     }
 
-    const payload = await response.json();
-    const list = Array.isArray(payload?.data) ? payload.data : [];
     const score = list.find((item) => item?.mal_id === episode)?.score;
     // Convert the 1-5 poll average to a /10 score (score / 5 * 10); null/0 means no votes.
     return typeof score === "number" && score > 0
@@ -1013,50 +1106,18 @@
       : null;
   }
 
-  // AniList's GraphQL API rate-limits (currently about 30 requests/minute, returning 429 with a
-  // Retry-After). Serialize requests through a shared queue so navigating quickly does not fire a
-  // burst, and retry a transient 429/5xx once with a bounded backoff. Unlike Jikan there is no
-  // base gap: a single page's AniList calls are already awaited in sequence, so adding a gap would
-  // only slow the first render without meaningfully helping the per-minute budget.
-  const ANILIST_MAX_ATTEMPTS = 2;
-  const ANILIST_MAX_BACKOFF_MS = 1500;
-  const ANILIST_RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+  // AniList's GraphQL API rate-limits (about 30 requests/minute, returning 429 with Retry-After: 60).
+  // Serialize requests through a shared queue so navigating quickly does not fire a burst. No retry:
+  // the reset window is ~60s, far longer than a render can wait on, so a 429/5xx returns immediately
+  // and the caller falls back. Unlike Jikan there is no base gap: a single page's AniList calls are
+  // already awaited in sequence, so adding a gap would only slow the first render.
+  const ANILIST_TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
   let aniListQueue = Promise.resolve();
 
   function aniListFetch(url, options) {
-    // Chain onto the previous call so only one AniList request is in flight at a time.
-    const run = aniListQueue.then(async () => {
-      for (let attempt = 1; attempt <= ANILIST_MAX_ATTEMPTS; attempt++) {
-        let response;
-        try {
-          response = await fetch(url, options);
-        } catch (error) {
-          // Network error: retry once with a backoff unless this was the last attempt.
-          if (attempt === ANILIST_MAX_ATTEMPTS) {
-            throw error;
-          }
-          await sleep(ANILIST_MAX_BACKOFF_MS);
-          continue;
-        }
-
-        // Retry rate-limit and transient server errors; return anything else as-is for the
-        // caller to handle.
-        if (response.ok || !ANILIST_RETRY_STATUSES.has(response.status) || attempt === ANILIST_MAX_ATTEMPTS) {
-          return response;
-        }
-
-        // Honour a Retry-After header when present, otherwise back off; cap the wait so a
-        // rate-limited page fails fast and recovers via the short negative cache instead of
-        // blocking the render for the full reset window.
-        const retryAfter = Number.parseFloat(response.headers.get("Retry-After") || "");
-        const backoff =
-          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : ANILIST_MAX_BACKOFF_MS;
-        await sleep(Math.min(backoff, ANILIST_MAX_BACKOFF_MS));
-      }
-
-      // The loop always returns or throws above; this satisfies the return-a-Response contract.
-      return fetch(url, options);
-    });
+    // Chain onto the previous call so only one AniList request is in flight at a time. No retry:
+    // the response (including a 429/5xx) is returned as-is for the caller to fall back on.
+    const run = aniListQueue.then(() => fetch(url, options));
 
     // Keep the queue chain alive even if this request rejects, so later calls still run.
     aniListQueue = run.then(
@@ -1077,9 +1138,9 @@
       method: "POST"
     });
 
-    // Treat a rate-limit/server error (after the retries above) as a transport failure so callers
-    // can flag it and cache the lookup only briefly; a non-retryable non-2xx just yields no data.
-    if (ANILIST_RETRY_STATUSES.has(response.status)) {
+    // Treat a rate-limit/server error as a transport failure so callers can flag it and cache the
+    // lookup only briefly, then fall back; a non-transient non-2xx just yields no data.
+    if (ANILIST_TRANSIENT_STATUSES.has(response.status)) {
       throw new Error(`AniList request failed with status ${response.status}`);
     }
     if (!response.ok) {

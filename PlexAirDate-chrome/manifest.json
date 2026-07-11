@@ -3,7 +3,9 @@
   "name": "Plex Air Date",
   "version": "0.7.0",
   "description": "Adds episode air dates to Plex show, season, and episode pages, showing the current, latest, and next episode air dates and when a season aired, plus the MyAnimeList (MAL) score for anime, which Plex does not display itself.",
-  "permissions": [],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://api.tvmaze.com/*",
     "https://graphql.anilist.co/*",
