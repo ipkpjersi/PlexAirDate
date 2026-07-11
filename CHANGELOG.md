@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.9.0
+
+- Switched the MyAnimeList data source from Jikan to Tenrai (a drop-in, schema-compatible MyAnimeList API). Jikan is being discontinued on October 1, 2026 and had become unreliable, with several of its endpoints intermittently timing out, which is what caused the anime score to keep falling back to the AniList score or disappear. Tenrai serves the same data (including the per-episode scores) from a proper structured API instead of scraping, so scores load reliably again. AniList and TVmaze remain as fallbacks exactly as before.
+
 ## 0.8.1
 
 - Added detailed diagnostic logging to the browser console (each line prefixed with "[PlexAirDate]") that traces exactly what the extension does on each page: which sources it queries, the status of every MyAnimeList and AniList request and any retries, cache and stored-id hits, and the final score it shows. This is a troubleshooting aid only and does not change what the extension displays; it can be turned off by setting DEBUG to false in the code.

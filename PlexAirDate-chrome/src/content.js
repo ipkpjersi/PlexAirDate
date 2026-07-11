@@ -762,8 +762,20 @@
     };
   }
 
-  // Jikan (the unofficial MyAnimeList API) rate-limits aggressively (about 3 requests/second
-  // and 60/minute) and intermittently returns 429/5xx. Serialize its requests behind a shared
+  // MyAnimeList data API base. Jikan (api.jikan.moe/v4) is being discontinued on 2026-10-01; Tenrai
+  // (api.tenrai.org/v1) is a drop-in, Jikan v4 schema-compatible replacement built on structured
+  // data instead of HTML scraping, which fixes Jikan's per-endpoint gateway failures. Swapping is a
+  // one-line base-URL change; repoint here to a self-hosted Jikan or back to Jikan if ever needed.
+  // The JIKAN_* names below are kept as-is since Tenrai mirrors Jikan's request model and limits.
+  const MAL_API_BASE = "https://api.tenrai.org/v1";
+  // Optional Tenrai server key (Patreon-only) for higher limits (300/min, unlimited/day vs the
+  // public 60/min, 40k/day). Leave BLANK in any published/shared build: it is per-key (not per-IP),
+  // so a shipped key is a shared bucket AND is trivially extractable from this file. Only set it in
+  // a private, self-loaded build for personal use. When blank, requests use the public per-IP tier.
+  const MAL_SERVER_KEY = "";
+
+  // The MAL API rate-limits (Tenrai public: ~3 requests/second and 60/minute, plus a stricter
+  // 30/minute on the search endpoint) and can return 429/5xx. Serialize requests behind a shared
   // queue spaced at least JIKAN_MIN_GAP_MS apart so back-to-back calls do not trip the per-second
   // limit. The 3/second limit is a ~333ms floor, so 350ms keeps us just under it while adding as
   // little first-render latency as possible. A transient 5xx is retried (see JIKAN_RETRY_STATUSES);
@@ -797,7 +809,12 @@
 
         let response;
         try {
-          response = await fetch(url, { credentials: "omit" });
+          response = await fetch(url, {
+            credentials: "omit",
+            // Send the optional Tenrai server key when one is configured; omit headers otherwise so
+            // requests use the public per-IP tier.
+            headers: MAL_SERVER_KEY ? { "X-Server-Key": MAL_SERVER_KEY } : undefined
+          });
         } catch (error) {
           // Network error: retry with a growing backoff unless this was the last attempt.
           jikanLastRequestAt = Date.now();
@@ -820,7 +837,10 @@
       }
 
       // The loop always returns or throws above; this satisfies the return-a-Response contract.
-      return fetch(url, { credentials: "omit" });
+      return fetch(url, {
+        credentials: "omit",
+        headers: MAL_SERVER_KEY ? { "X-Server-Key": MAL_SERVER_KEY } : undefined
+      });
     });
 
     // Keep the queue chain alive even if this request rejects, so later calls still run.
@@ -833,7 +853,7 @@
 
   async function fetchMalScore(idMal) {
     // Jikan is the unofficial MyAnimeList API; data.score is MAL's rating on a 0-10 scale.
-    const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${idMal}`);
+    const response = await fetchJikan(`${MAL_API_BASE}/anime/${idMal}`);
     if (!response.ok) {
       return null;
     }
@@ -859,7 +879,7 @@
       return malFullCache.get(malId);
     }
 
-    const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${malId}/full`);
+    const response = await fetchJikan(`${MAL_API_BASE}/anime/${malId}/full`);
     if (!response.ok) {
       // A rate-limit/server error is transient: throw so the walk aborts without caching a wrong
       // result, letting the caller fall back to another score source. A genuine miss (e.g. 404) is
@@ -1026,7 +1046,7 @@
 
     log(`  MAL search "${title}" (Jikan)`);
     const params = new URLSearchParams({ q: title, limit: "8" });
-    const response = await fetchJikan(`https://api.jikan.moe/v4/anime?${params.toString()}`);
+    const response = await fetchJikan(`${MAL_API_BASE}/anime?${params.toString()}`);
     if (!response.ok) {
       // A rate-limit/server error (429/5xx) is transient; a plain miss (e.g. 404) is a real miss.
       if (JIKAN_TRANSIENT_STATUSES.has(response.status)) {
@@ -1172,7 +1192,7 @@
     let list = malEpisodesPageCache.get(cacheKey);
     if (!list) {
       const params = new URLSearchParams({ page: String(page) });
-      const response = await fetchJikan(`https://api.jikan.moe/v4/anime/${idMal}/episodes?${params.toString()}`);
+      const response = await fetchJikan(`${MAL_API_BASE}/anime/${idMal}/episodes?${params.toString()}`);
       if (!response.ok) {
         // Transient or a miss: return null uncached so a later view can try again.
         return null;
