@@ -789,6 +789,10 @@
   // is too long) but still means "fall back to another source".
   const JIKAN_RETRY_STATUSES = new Set([500, 502, 503, 504]);
   const JIKAN_TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+  // MAL entry types that are never a browsable series (short song clips, commercials, promotional
+  // videos). A title search that returns one of these is a false positive - they can share a title
+  // or translated synonym with an unrelated show - so searchMalBaseEntry skips them when matching.
+  const NON_SERIES_MAL_TYPES = new Set(["Music", "CM", "PV"]);
   let jikanQueue = Promise.resolve();
   let jikanLastRequestAt = 0;
 
@@ -1061,6 +1065,13 @@
     const payload = await response.json();
     const list = Array.isArray(payload?.data) ? payload.data : [];
     const match = list.find((item) => {
+      // Skip non-series entry types (Music shorts, Commercials, Promotional Videos): these are tiny
+      // ad/song clips that can share a title (or a translated synonym) with an unrelated show and
+      // would otherwise attach their score to it - e.g. the sitcom "King of the Hill" matching the
+      // Minna no Uta short "Oyama no Taishou" whose synonyms include "King of the Hill".
+      if (item?.type && NON_SERIES_MAL_TYPES.has(item.type)) {
+        return false;
+      }
       const names = [
         item?.title,
         item?.title_english,

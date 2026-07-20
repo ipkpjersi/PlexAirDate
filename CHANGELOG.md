@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.9.1
+
+- Fixed non-anime shows occasionally picking up a wrong MyAnimeList score. Short MyAnimeList entries that are not real series (music/song clips, commercials, and promotional videos) are now skipped when matching a title, so a coincidental title collision no longer attaches their score to an unrelated show. For example, the live-action sitcom "King of the Hill" was matching the one-minute Minna no Uta music short "Oyama no Taishou" (whose listed synonyms include "King of the Hill") and showing its 4.79 score.
+
 ## 0.9.0
 
 - Switched the MyAnimeList data source from Jikan to Tenrai (a drop-in, schema-compatible MyAnimeList API). Jikan is being discontinued on October 1, 2026 and had become unreliable, with several of its endpoints intermittently timing out, which is what caused the anime score to keep falling back to the AniList score or disappear. Tenrai serves the same data (including the per-episode scores) from a proper structured API instead of scraping, so scores load reliably again. AniList and TVmaze remain as fallbacks exactly as before.
