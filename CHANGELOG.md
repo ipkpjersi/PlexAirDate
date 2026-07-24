@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.9.2
+
+- Extended the 0.9.1 fix to the AniList lookup. The same "King of the Hill" collision was still slipping through on AniList: when MyAnimeList had no match, the extension fell back to AniList, which matched the Minna no Uta music short "Oyama no Taishou" (synonym "King of the Hill") and showed its 4.79 score again. AniList music-format entries are now skipped the same way the non-series MyAnimeList entries already were, so a coincidental title collision no longer attaches a song clip's score to an unrelated show.
+
 ## 0.9.1
 
 - Fixed non-anime shows occasionally picking up a wrong MyAnimeList score. Short MyAnimeList entries that are not real series (music/song clips, commercials, and promotional videos) are now skipped when matching a title, so a coincidental title collision no longer attaches their score to an unrelated show. For example, the live-action sitcom "King of the Hill" was matching the one-minute Minna no Uta music short "Oyama no Taishou" (whose listed synonyms include "King of the Hill") and showing its 4.79 score.

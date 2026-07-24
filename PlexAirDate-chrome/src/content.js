@@ -639,6 +639,7 @@
         Media(search: $search, type: ANIME) {
           id
           idMal
+          format
           averageScore
           synonyms
           title {
@@ -681,6 +682,15 @@
     ].filter(Boolean);
 
     if (!media || !titles.some((title) => isProbableTitleMatch(context.title, title))) {
+      return null;
+    }
+
+    // Reject short song/ad clips the same way the MAL search path does: a MUSIC-format entry can
+    // share a title (or translated synonym) with an unrelated show - e.g. the Minna no Uta short
+    // "Oyama no Taishou" (synonym "King of the Hill") matching the sitcom - and its score is not
+    // the show's score. Mirrors NON_SERIES_MAL_TYPES in searchMalBaseEntry.
+    if (media.format && NON_SERIES_ANILIST_FORMATS.has(media.format)) {
+      log(`  AniList result: match is a non-series ${media.format} entry - treating as no match`);
       return null;
     }
 
@@ -793,6 +803,11 @@
   // videos). A title search that returns one of these is a false positive - they can share a title
   // or translated synonym with an unrelated show - so searchMalBaseEntry skips them when matching.
   const NON_SERIES_MAL_TYPES = new Set(["Music", "CM", "PV"]);
+  // The AniList format equivalents of NON_SERIES_MAL_TYPES, used to reject the same short song/ad
+  // clips on the AniList search path (AniList has no CM/PV format; MUSIC covers the song shorts).
+  // Without this an AniList entry like the Minna no Uta short "Oyama no Taishou" (format MUSIC),
+  // whose synonyms include "King of the Hill", would match the sitcom and attach its MAL score.
+  const NON_SERIES_ANILIST_FORMATS = new Set(["MUSIC"]);
   let jikanQueue = Promise.resolve();
   let jikanLastRequestAt = 0;
 
