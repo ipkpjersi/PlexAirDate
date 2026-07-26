@@ -12,6 +12,29 @@
   color: rgba(255, 255, 255, 0.78);
 }
 
+/* Links in our own row (the MAL/AniList/TVmaze score and source names). Declared before the rules
+   that colour those parts so their colours still win: a link looks identical to the plain text it
+   replaced and only picks up an underline once hovered or keyboard-focused. */
+.plex-air-date-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.plex-air-date-link:hover,
+.plex-air-date-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* Plex's own IMDb/TMDB rating badges, made clickable by the content script. Only the cursor and the
+   hover underline are added; Plex keeps full control of the badge's colour, size, and layout. */
+[data-plex-air-date-link] {
+  cursor: pointer;
+}
+
+[data-plex-air-date-link]:hover {
+  text-decoration: underline;
+}
+
 .plex-air-date-pill {
   align-items: center;
   display: inline-flex;

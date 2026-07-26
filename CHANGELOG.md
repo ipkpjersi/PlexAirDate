@@ -2,6 +2,12 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.10.0
+
+- The MyAnimeList, AniList, and TVmaze names and scores the extension adds are now clickable and open the matching entry in a new tab: the score line opens the anime's MyAnimeList or AniList page (the per-episode score opens that episode's own MyAnimeList page), and the source name next to each air date opens the show on TVmaze or AniList.
+- Plex's own IMDb and TMDB rating badges are now clickable too, which Plex itself does not offer. IMDb opens the exact title page when TVmaze supplied the show's IMDb id, and otherwise falls back to an IMDb search for the title; TMDB opens a search for the title, since none of the data sources the extension already uses expose a TMDB id. The badges are left exactly as Plex draws them, so nothing about them changes visually until hovered.
+- None of the links change how any of the text looks: they take the colour they already had and only show an underline while hovered or keyboard-focused.
+
 ## 0.9.2
 
 - Extended the 0.9.1 fix to the AniList lookup. The same "King of the Hill" collision was still slipping through on AniList: when MyAnimeList had no match, the extension fell back to AniList, which matched the Minna no Uta music short "Oyama no Taishou" (synonym "King of the Hill") and showed its 4.79 score again. AniList music-format entries are now skipped the same way the non-series MyAnimeList entries already were, so a coincidental title collision no longer attaches a song clip's score to an unrelated show.

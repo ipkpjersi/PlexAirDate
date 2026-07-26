@@ -29,6 +29,9 @@
   // MAL episodes-list pages (100 episode scores each) keyed by `malId|page`, so every episode that
   // falls on the same page reuses one Jikan call instead of re-fetching the page per episode.
   const malEpisodesPageCache = new Map();
+  // IMDb ids (tt...) resolved from TVmaze's externals, keyed by canonical title, so Plex's own IMDb
+  // rating badge can link straight to the title page instead of falling back to an IMDb search.
+  const imdbIdCache = new Map();
 
   let pendingRender = 0;
   let lastPageKey = "";
@@ -220,19 +223,19 @@
 
     if (data.current) {
       const text = formatEpisode(data.current, airVerb(data.current.airDate));
-      row.append(buildPill("Current episode", text, source));
+      row.append(buildPill("Current episode", text, source, data.sourceUrl));
       titleParts.push(`Current episode: ${text}`);
     }
 
     if (data.latest) {
       const text = formatEpisode(data.latest, airVerb(data.latest.airDate));
-      row.append(buildPill("Latest episode", text, source));
+      row.append(buildPill("Latest episode", text, source, data.sourceUrl));
       titleParts.push(`Latest episode: ${text}`);
     }
 
     if (data.next) {
       const text = formatEpisode(data.next, "airs");
-      row.append(buildPill("Next episode", text, source));
+      row.append(buildPill("Next episode", text, source, data.sourceUrl));
       titleParts.push(`Next episode: ${text}`);
     }
 
@@ -260,7 +263,7 @@
     row.title = `${titleParts.join(" | ")}${source}`;
   }
 
-  function buildPill(labelText, valueText, source) {
+  function buildPill(labelText, valueText, source, sourceUrl) {
     const pill = document.createElement("span");
     pill.className = "plex-air-date-pill";
 
@@ -272,20 +275,43 @@
     text.className = "plex-air-date-text";
     text.textContent = valueText;
 
-    const sourceNode = document.createElement("span");
-    sourceNode.className = "plex-air-date-source";
-    sourceNode.textContent = source;
+    // The air-date source name links to the show's page on that site when its URL is known. The
+    // leading space that `source` carries for the row tooltip is dropped here so the hover
+    // underline starts at the name itself; the pill's flex gap already supplies the spacing.
+    const sourceNode = buildLinkable("span", "plex-air-date-source", sourceUrl);
+    sourceNode.textContent = sourceUrl ? source.trim() : source;
 
     pill.append(label, text, sourceNode);
     return pill;
   }
 
+  function buildLinkable(tagName, className, url) {
+    // A node that becomes an anchor when a URL is known and stays a plain element otherwise. The
+    // anchor keeps the plex-air-date-link class, which inherits the surrounding colour and only
+    // adds an underline on hover, so the text looks unchanged until it is hovered.
+    if (!url) {
+      const node = document.createElement(tagName);
+      node.className = className;
+      return node;
+    }
+
+    const anchor = document.createElement("a");
+    anchor.className = `${className} plex-air-date-link`;
+    anchor.href = url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    // The metadata block sits inside Plex's own clickable UI, so keep the click from also
+    // triggering whatever Plex has bound further up the tree.
+    anchor.addEventListener("click", (event) => event.stopPropagation());
+    return anchor;
+  }
+
   function buildRatingLine(rating, tag) {
     // The anime score line: the MAL logo (or the source name for the AniList/TVmaze fallbacks)
     // followed by the score, all in white so it reads as its own distinct line. An optional
-    // tag (e.g. "EP") distinguishes the per-episode score from the series score.
-    const line = document.createElement("span");
-    line.className = "plex-air-date-rating";
+    // tag (e.g. "EP") distinguishes the per-episode score from the series score. The whole line
+    // links to the entry it was scored from (MAL/AniList/TVmaze) when that URL is known.
+    const line = buildLinkable("span", "plex-air-date-rating", rating.url);
     line.title = `${rating.source}${tag ? " episode" : ""} score ${formatRating(rating)}`;
 
     if (rating.source === "MAL") {
@@ -539,6 +565,15 @@
     const showWithEpisodes = await detailResponse.json();
     const embedded = showWithEpisodes?._embedded;
     const now = new Date();
+    const showUrl = typeof showWithEpisodes?.url === "string" ? showWithEpisodes.url : null;
+
+    // TVmaze also carries the show's IMDb id, which is the only direct id any of the APIs here
+    // expose for a site Plex itself links nowhere; remember it so Plex's own IMDb rating badge can
+    // point at the exact title page (see decorateNativeRatings).
+    const imdbId = showWithEpisodes?.externals?.imdb;
+    if (typeof imdbId === "string" && imdbId) {
+      imdbIdCache.set(canonicalTitle(context.title), imdbId);
+    }
 
     // TVmaze's own average rating (already on a 0-10 scale) is kept as a last-resort score,
     // used only when the anime's MAL/AniList score is unavailable (see fetchAirInfo). null
@@ -546,7 +581,7 @@
     const tvmazeAverage = showWithEpisodes?.rating?.average;
     const rating =
       typeof tvmazeAverage === "number" && tvmazeAverage > 0
-        ? { score: tvmazeAverage, max: 10, source: "TVmaze" }
+        ? { score: tvmazeAverage, max: 10, source: "TVmaze", url: showUrl }
         : null;
 
     const next = toTvmazeEpisode(embedded?.nextepisode);
@@ -574,6 +609,7 @@
 
     return {
       source: "TVmaze",
+      sourceUrl: showUrl,
       rating,
       current: currentEpisode,
       latest: latestEpisode,
@@ -631,6 +667,16 @@
       episode: episode.number || null,
       season: episode.season || null
     };
+  }
+
+  // Public entry pages for the ids these APIs return, used to make the score and source names in
+  // our row clickable. Both sites resolve an id-only URL, so no title slug is needed.
+  function anilistUrl(mediaId) {
+    return typeof mediaId === "number" ? `https://anilist.co/anime/${mediaId}` : null;
+  }
+
+  function malAnimeUrl(malId) {
+    return typeof malId === "number" ? `https://myanimelist.net/anime/${malId}` : null;
   }
 
   async function fetchFromAniList(context, { skipJikan = false } = {}) {
@@ -738,7 +784,7 @@
       rating = await guard(fetchMalScore(seasonMedia.idMal));
     }
     if (!rating && typeof seasonMedia?.averageScore === "number") {
-      rating = { score: seasonMedia.averageScore / 10, max: 10, source: "AniList" };
+      rating = { score: seasonMedia.averageScore / 10, max: 10, source: "AniList", url: anilistUrl(seasonMedia.id) };
     }
 
     // MAL per-episode poll score, on episode pages, from the resolved season entry. Skipped when
@@ -762,6 +808,7 @@
     log(`  AniList result: rating ${rating ? `${rating.score} (${rating.source})` : "none"}${skipJikan ? " [skipJikan]" : ""}${state.failed ? " [some sub-calls failed]" : ""}`);
     return {
       source: "AniList",
+      sourceUrl: anilistUrl(seasonMedia?.id ?? media?.id),
       rating,
       episodeRating,
       current: currentEpisode,
@@ -881,7 +928,9 @@
     const score = payload?.data?.score;
     // Jikan returns 0 (not null) for an anime with no score yet, so treat 0 as "no score"
     // and let the caller fall back to the AniList average.
-    return typeof score === "number" && score > 0 ? { score, max: 10, source: "MAL" } : null;
+    return typeof score === "number" && score > 0
+      ? { score, max: 10, source: "MAL", url: malAnimeUrl(idMal) }
+      : null;
   }
 
   // A MAL entry counts as a numbered season only if it is a TV or ONA (newer seasons often stream
@@ -1187,7 +1236,9 @@
 
   async function buildMalRating(context, entry) {
     // Turn a resolved MAL entry { malId, episodes, score } into the series and per-episode ratings.
-    let rating = entry.score ? { score: entry.score, max: 10, source: "MAL" } : null;
+    let rating = entry.score
+      ? { score: entry.score, max: 10, source: "MAL", url: malAnimeUrl(entry.malId) }
+      : null;
     if (!rating && entry.malId) {
       // The resolved entry carried no inline score (rare); ask MAL directly before giving up.
       rating = await fetchMalScore(entry.malId).catch(() => null);
@@ -1228,10 +1279,19 @@
       malEpisodesPageCache.set(cacheKey, list);
     }
 
-    const score = list.find((item) => item?.mal_id === episode)?.score;
+    const entry = list.find((item) => item?.mal_id === episode);
+    const score = entry?.score;
     // Convert the 1-5 poll average to a /10 score (score / 5 * 10); null/0 means no votes.
+    // The episodes list carries each episode's own MAL page URL, so the EP line links straight to
+    // that episode rather than to the series entry; fall back to the series page when it is absent.
     return typeof score === "number" && score > 0
-      ? { score: (score / 5) * 10, max: 10, source: "MAL", perEpisode: true }
+      ? {
+          score: (score / 5) * 10,
+          max: 10,
+          source: "MAL",
+          perEpisode: true,
+          url: typeof entry?.url === "string" && entry.url ? entry.url : malAnimeUrl(idMal)
+        }
       : null;
   }
 
@@ -1450,6 +1510,109 @@
     );
   }
 
+  // Plex draws the IMDb and TMDB ratings as a logo plus a score but links neither anywhere, so we
+  // make those badges clickable. Plex owns that markup (React re-renders it), so nothing is wrapped
+  // or restyled: the destination is parked in a data attribute and one delegated listener opens it,
+  // which a re-render can only undo, never corrupt - the next observer tick simply re-applies it.
+  const NATIVE_LINK_ATTR = "data-plex-air-date-link";
+  const NATIVE_RATING_SITES = [
+    {
+      key: "IMDb",
+      // Plex's rating image for IMDb is named after the site (e.g. .../imdb.png, possibly
+      // URL-encoded inside a /photo/:/transcode link), which is what identifies the badge.
+      pattern: /imdb/iu,
+      // A direct title link when TVmaze supplied the IMDb id for this show, else an IMDb search.
+      url: (title) => {
+        const imdbId = imdbIdCache.get(canonicalTitle(title));
+        return imdbId
+          ? `https://www.imdb.com/title/${imdbId}/`
+          : `https://www.imdb.com/find/?${new URLSearchParams({ q: title, s: "tt" }).toString()}`;
+      }
+    },
+    {
+      key: "TMDB",
+      // Plex names TMDB "themoviedb" in its rating image; "tmdb" is accepted as well.
+      pattern: /themoviedb|tmdb/iu,
+      // No API this extension already calls exposes a TMDB id, so this links to a title search.
+      url: (title) => `https://www.themoviedb.org/search?${new URLSearchParams({ query: title }).toString()}`
+    }
+  ];
+
+  function describeBadge(node) {
+    // Everything on the node that could name the rating site: the image URL, its accessible text,
+    // and a CSS background image for the cases where Plex draws the logo that way.
+    return [
+      node.getAttribute("src"),
+      node.getAttribute("alt"),
+      node.getAttribute("aria-label"),
+      node.getAttribute("title"),
+      node.style?.backgroundImage
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function nativeBadgeTarget(badge) {
+    // Prefer the small wrapper holding the logo and the score together so the whole badge is
+    // clickable, not just the logo; fall back to the logo itself when the parent looks like a
+    // larger layout container (or already contains a link of Plex's own).
+    const parent = badge.parentElement;
+    if (parent && parent.querySelectorAll("*").length <= 4 && !parent.querySelector("a")) {
+      return parent;
+    }
+
+    return badge;
+  }
+
+  function decorateNativeRatings(title) {
+    // Scope the scan to the metadata block so unrelated artwork elsewhere on the page can never
+    // match one of the site patterns.
+    const scope = document.querySelector('[data-testid="metadata"]');
+    if (!scope || !title) {
+      return;
+    }
+
+    for (const badge of scope.querySelectorAll('img, [style*="background-image"]')) {
+      if (badge.closest("a")) {
+        // Already a link of Plex's own; leave it alone.
+        continue;
+      }
+
+      const description = describeBadge(badge);
+      const site = NATIVE_RATING_SITES.find((candidate) => candidate.pattern.test(description));
+      if (!site) {
+        continue;
+      }
+
+      const target = nativeBadgeTarget(badge);
+      const url = site.url(title);
+      if (target.getAttribute(NATIVE_LINK_ATTR) === url) {
+        continue;
+      }
+
+      target.setAttribute(NATIVE_LINK_ATTR, url);
+      log(`native rating link: ${site.key} -> ${url}`);
+    }
+  }
+
+  document.addEventListener(
+    "click",
+    (event) => {
+      const target = event.target instanceof Element ? event.target.closest(`[${NATIVE_LINK_ATTR}]`) : null;
+      const url = target?.getAttribute(NATIVE_LINK_ATTR);
+      if (!url) {
+        return;
+      }
+
+      // Capture phase plus stopPropagation so Plex's own handler on the surrounding UI does not
+      // also run and navigate the app underneath the newly opened tab.
+      event.preventDefault();
+      event.stopPropagation();
+      window.open(url, "_blank", "noopener");
+    },
+    true
+  );
+
   async function render() {
     pendingRender = 0;
 
@@ -1458,6 +1621,10 @@
       lastPageKey = "";
       return;
     }
+
+    // Plex's own IMDb/TMDB badges are linked on every page that shows them (movies included),
+    // independent of the air-date row below, which only covers shows, seasons, and episodes.
+    decorateNativeRatings(normalizeTitle(document.querySelector('[data-testid="metadata-title"]')?.textContent || ""));
 
     const context = getMetadataContext();
     if (!context) {
@@ -1492,6 +1659,9 @@
 
     log("render: row updated");
     setRow(row, airInfo);
+    // The TVmaze lookup may have just resolved this show's IMDb id, so upgrade Plex's IMDb badge
+    // from a title search to a direct link.
+    decorateNativeRatings(context.title);
   }
 
   function scheduleRender() {
