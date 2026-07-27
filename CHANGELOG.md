@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.11.1
+
+- Middle-clicked rating badges now open their tabs the way middle-clicked links do. 0.11.0 forced each new tab into the slot immediately after the current one, which meant opening two badges in a row left them in the reverse of the order they were clicked, and the tab bar did not scroll to reveal them the way it does for an ordinary link. The browser is now left to place the tab itself, which is what restores both.
+
 ## 0.11.0
 
 - Middle-clicking one of those badges now opens the site in a new background tab instead of starting the page's autoscroll, exactly as middle-clicking an ordinary link does, and the new tab opens directly to the right of the current one. Only left click worked before, because a middle click is a different browser event than a left click and its scroll behaviour begins the moment the button goes down. Ctrl-click (Cmd-click on a Mac) opens a background tab too. This is what the extension's new background script is for: page scripts can only open a tab that steals focus, so opening one in the background has to be done by the extension itself. It adds no new permissions and does nothing else.

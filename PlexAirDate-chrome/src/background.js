@@ -34,12 +34,14 @@ api.runtime.onMessage.addListener((message, sender) => {
     return;
   }
 
-  // Put the tab directly after the one it came from and record that tab as its opener, which is
-  // what the browser itself does for a middle-clicked link.
+  // Record the originating tab as the opener and let the browser place the new tab itself, which is
+  // what makes this behave like a middle-clicked link. Do NOT also pass an explicit index: forcing
+  // the position overrides the browser's own related-tab handling, which is what puts each further
+  // tab after the previous one (rather than reversing their order) and scrolls the tab strip to
+  // reveal the new tab.
   api.tabs.create({
     url: target.href,
     active: false,
-    index: typeof sender.tab?.index === "number" ? sender.tab.index + 1 : undefined,
     openerTabId: sender.tab?.id
   });
 });
