@@ -2,6 +2,10 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.10.1
+
+- Fixed the IMDb and TMDB rating badges added in 0.10.0 never actually becoming clickable. Plex draws those badges as an inline SVG logo next to the score rather than as an image, and identifies the site only in the badge's tooltip text, so the image-based detection 0.10.0 shipped with never matched anything and the badges stayed inert on every page. They are now found by that tooltip inside Plex's own ratings block, and the whole badge (logo and score) is clickable.
+
 ## 0.10.0
 
 - The MyAnimeList, AniList, and TVmaze names and scores the extension adds are now clickable and open the matching entry in a new tab: the score line opens the anime's MyAnimeList or AniList page (the per-episode score opens that episode's own MyAnimeList page), and the source name next to each air date opens the show on TVmaze or AniList.

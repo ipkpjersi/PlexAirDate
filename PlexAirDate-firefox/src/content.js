@@ -1515,12 +1515,14 @@
   // or restyled: the destination is parked in a data attribute and one delegated listener opens it,
   // which a re-render can only undo, never corrupt - the next observer tick simply re-applies it.
   const NATIVE_LINK_ATTR = "data-plex-air-date-link";
+  // Each badge is a span wrapping the site's inline <svg> logo and a span with the score, and the
+  // wrapper carries a title like "IMDb Rating 8.1" / "TMDB Rating 84%". That title is what names the
+  // site: the SVG paths are anonymous, and the score span repeats the same title, so the wrapper is
+  // singled out by being the one that directly contains the logo.
   const NATIVE_RATING_SITES = [
     {
       key: "IMDb",
-      // Plex's rating image for IMDb is named after the site (e.g. .../imdb.png, possibly
-      // URL-encoded inside a /photo/:/transcode link), which is what identifies the badge.
-      pattern: /imdb/iu,
+      pattern: /^\s*IMDb\b/u,
       // A direct title link when TVmaze supplied the IMDb id for this show, else an IMDb search.
       url: (title) => {
         const imdbId = imdbIdCache.get(canonicalTitle(title));
@@ -1531,66 +1533,37 @@
     },
     {
       key: "TMDB",
-      // Plex names TMDB "themoviedb" in its rating image; "tmdb" is accepted as well.
-      pattern: /themoviedb|tmdb/iu,
+      pattern: /^\s*(?:TMDB|TheMovieDB)\b/iu,
       // No API this extension already calls exposes a TMDB id, so this links to a title search.
       url: (title) => `https://www.themoviedb.org/search?${new URLSearchParams({ query: title }).toString()}`
     }
   ];
 
-  function describeBadge(node) {
-    // Everything on the node that could name the rating site: the image URL, its accessible text,
-    // and a CSS background image for the cases where Plex draws the logo that way.
-    return [
-      node.getAttribute("src"),
-      node.getAttribute("alt"),
-      node.getAttribute("aria-label"),
-      node.getAttribute("title"),
-      node.style?.backgroundImage
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  function nativeBadgeTarget(badge) {
-    // Prefer the small wrapper holding the logo and the score together so the whole badge is
-    // clickable, not just the logo; fall back to the logo itself when the parent looks like a
-    // larger layout container (or already contains a link of Plex's own).
-    const parent = badge.parentElement;
-    if (parent && parent.querySelectorAll("*").length <= 4 && !parent.querySelector("a")) {
-      return parent;
-    }
-
-    return badge;
-  }
-
   function decorateNativeRatings(title) {
-    // Scope the scan to the metadata block so unrelated artwork elsewhere on the page can never
-    // match one of the site patterns.
-    const scope = document.querySelector('[data-testid="metadata"]');
-    if (!scope || !title) {
+    // Scoped to Plex's own ratings block so nothing else on the page can be mistaken for a badge.
+    // Note the badges are per-page: an episode page shows that episode's IMDb score while the link
+    // points at the series, since no source here exposes per-episode IMDb ids.
+    if (!title) {
       return;
     }
 
-    for (const badge of scope.querySelectorAll('img, [style*="background-image"]')) {
-      if (badge.closest("a")) {
-        // Already a link of Plex's own; leave it alone.
+    for (const badge of document.querySelectorAll('[data-testid="metadata-ratings"] [title]')) {
+      if (!badge.querySelector(":scope > svg")) {
+        // The inner score span repeats the wrapper's title; only the wrapper holds the logo.
         continue;
       }
 
-      const description = describeBadge(badge);
-      const site = NATIVE_RATING_SITES.find((candidate) => candidate.pattern.test(description));
+      const site = NATIVE_RATING_SITES.find((candidate) => candidate.pattern.test(badge.getAttribute("title") || ""));
       if (!site) {
         continue;
       }
 
-      const target = nativeBadgeTarget(badge);
       const url = site.url(title);
-      if (target.getAttribute(NATIVE_LINK_ATTR) === url) {
+      if (badge.getAttribute(NATIVE_LINK_ATTR) === url) {
         continue;
       }
 
-      target.setAttribute(NATIVE_LINK_ATTR, url);
+      badge.setAttribute(NATIVE_LINK_ATTR, url);
       log(`native rating link: ${site.key} -> ${url}`);
     }
   }
@@ -1598,7 +1571,10 @@
   document.addEventListener(
     "click",
     (event) => {
-      const target = event.target instanceof Element ? event.target.closest(`[${NATIVE_LINK_ATTR}]`) : null;
+      // The click can land on the inline SVG logo as well as the score text, so walk up from
+      // whatever was hit. Duck-typed rather than an instanceof check, which the SVG elements and
+      // the content script's separate realm would make unreliable.
+      const target = event.target?.closest?.(`[${NATIVE_LINK_ATTR}]`);
       const url = target?.getAttribute(NATIVE_LINK_ATTR);
       if (!url) {
         return;
