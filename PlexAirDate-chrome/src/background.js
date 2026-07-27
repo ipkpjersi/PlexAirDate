@@ -7,6 +7,12 @@
 //
 // No extra permission is needed: creating a tab at a given URL does not require the "tabs"
 // permission, which only governs reading privileged tab fields such as the URL or title.
+//
+// The Jellyfin port of this plugin deliberately has no equivalent of this file. Jellyfin renders its own
+// IMDb/TMDB links as real anchors (<a href target="_blank"> inside .itemExternalLinks), so the
+// browser handles every mouse button on them natively and there is nothing to intercept. Only Plex
+// needs any of this, because it draws its ratings as plain non-interactive markup that cannot be
+// turned into an anchor without breaking React (see decorateNativeRatings in content.js).
 const api = typeof browser !== "undefined" ? browser : chrome;
 const OPEN_BACKGROUND_TAB = "plex-air-date:open-background-tab";
 
