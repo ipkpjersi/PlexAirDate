@@ -1536,6 +1536,14 @@
       pattern: /^\s*(?:TMDB|TheMovieDB)\b/iu,
       // No API this extension already calls exposes a TMDB id, so this links to a title search.
       url: (title) => `https://www.themoviedb.org/search?${new URLSearchParams({ query: title }).toString()}`
+    },
+    {
+      key: "Rotten Tomatoes",
+      // Covers both badges Plex can show here: the critics tomatometer ("Rotten Tomatoes Rating")
+      // and the audience popcorn score ("Rotten Tomatoes Audience Rating").
+      pattern: /^\s*Rotten Tomatoes\b/iu,
+      // Same as TMDB: no id is available, so this links to a title search.
+      url: (title) => `https://www.rottentomatoes.com/search?${new URLSearchParams({ search: title }).toString()}`
     }
   ];
 
@@ -1568,23 +1576,80 @@
     }
   }
 
+  function nativeLinkUrl(event) {
+    // The click can land on the inline SVG logo as well as the score text, so walk up from
+    // whatever was hit. Duck-typed rather than an instanceof check, which the SVG elements and
+    // the content script's separate realm would make unreliable.
+    return event.target?.closest?.(`[${NATIVE_LINK_ATTR}]`)?.getAttribute(NATIVE_LINK_ATTR) || null;
+  }
+
+  // A content script's window.open always focuses the tab it opens, so a background tab has to be
+  // opened by the extension's background worker instead (see src/background.js).
+  const extRuntime =
+    (typeof browser !== "undefined" ? browser : typeof chrome !== "undefined" ? chrome : null)?.runtime || null;
+  const OPEN_BACKGROUND_TAB = "plex-air-date:open-background-tab";
+
+  function openTab(url, background) {
+    if (!background || !extRuntime?.sendMessage) {
+      window.open(url, "_blank", "noopener");
+      return;
+    }
+
+    try {
+      // Chrome returns a promise here and Firefox always has; either way the result is unused, and
+      // a rejection (an unreachable worker) falls back to a focused tab so the click still does
+      // something rather than silently nothing.
+      Promise.resolve(extRuntime.sendMessage({ type: OPEN_BACKGROUND_TAB, url })).catch(() => {
+        window.open(url, "_blank", "noopener");
+      });
+    } catch (error) {
+      window.open(url, "_blank", "noopener");
+    }
+  }
+
+  function openNativeLink(event, background) {
+    const url = nativeLinkUrl(event);
+    if (!url) {
+      return;
+    }
+
+    // Capture phase plus stopPropagation so Plex's own handler on the surrounding UI does not
+    // also run and navigate the app underneath the newly opened tab.
+    event.preventDefault();
+    event.stopPropagation();
+    openTab(url, background);
+  }
+
+  // Left click. These badges cannot be real anchors - they are Plex's own React nodes, and wrapping
+  // one in an <a> would move it out of the parent React recorded, so React's later removeChild would
+  // throw and take the app down - so the mouse buttons an anchor would handle are wired up by hand.
+  // Ctrl/Cmd-click goes to a background tab, matching what those modifiers do on a real link.
   document.addEventListener(
     "click",
-    (event) => {
-      // The click can land on the inline SVG logo as well as the score text, so walk up from
-      // whatever was hit. Duck-typed rather than an instanceof check, which the SVG elements and
-      // the content script's separate realm would make unreliable.
-      const target = event.target?.closest?.(`[${NATIVE_LINK_ATTR}]`);
-      const url = target?.getAttribute(NATIVE_LINK_ATTR);
-      if (!url) {
-        return;
-      }
+    (event) => openNativeLink(event, event.ctrlKey || event.metaKey),
+    true
+  );
 
-      // Capture phase plus stopPropagation so Plex's own handler on the surrounding UI does not
-      // also run and navigate the app underneath the newly opened tab.
-      event.preventDefault();
-      event.stopPropagation();
-      window.open(url, "_blank", "noopener");
+  // Middle click. Browsers fire auxclick rather than click for it, so it needs its own listener,
+  // and it opens in the background exactly as a middle-clicked link does.
+  document.addEventListener(
+    "auxclick",
+    (event) => {
+      if (event.button === 1) {
+        openNativeLink(event, true);
+      }
+    },
+    true
+  );
+
+  // The middle button's default action is the autoscroll cursor, and that is committed on mousedown,
+  // well before auxclick fires; cancelling it here is what stops the page scrolling instead.
+  document.addEventListener(
+    "mousedown",
+    (event) => {
+      if (event.button === 1 && nativeLinkUrl(event)) {
+        event.preventDefault();
+      }
     },
     true
   );

@@ -2,6 +2,11 @@
 
 All notable changes to Plex Air Date are listed here, newest first. Each entry matches a version bump in both the Chrome and Firefox manifests. The notes for a version can be copy-pasted into the Firefox Add-ons release notes field.
 
+## 0.11.0
+
+- Middle-clicking one of those badges now opens the site in a new background tab instead of starting the page's autoscroll, exactly as middle-clicking an ordinary link does, and the new tab opens directly to the right of the current one. Only left click worked before, because a middle click is a different browser event than a left click and its scroll behaviour begins the moment the button goes down. Ctrl-click (Cmd-click on a Mac) opens a background tab too. This is what the extension's new background script is for: page scripts can only open a tab that steals focus, so opening one in the background has to be done by the extension itself. It adds no new permissions and does nothing else.
+- The Rotten Tomatoes badges (both the critics tomatometer and the audience popcorn score) are now clickable too, opening a Rotten Tomatoes search for the title. As with TMDB, none of the data sources the extension uses expose a Rotten Tomatoes id, so a search is the closest a link can get.
+
 ## 0.10.1
 
 - Fixed the IMDb and TMDB rating badges added in 0.10.0 never actually becoming clickable. Plex draws those badges as an inline SVG logo next to the score rather than as an image, and identifies the site only in the badge's tooltip text, so the image-based detection 0.10.0 shipped with never matched anything and the badges stayed inert on every page. They are now found by that tooltip inside Plex's own ratings block, and the whole badge (logo and score) is clickable.
